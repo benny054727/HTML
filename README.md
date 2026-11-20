@@ -1,4 +1,4 @@
-# בוט טלגרם ב-Python שרץ בטלפון (Termux)
+# בוט טלגרם להחלפת פנים, ב-Python, שרץ בטלפון (Termux)
 
 ## שלב 1 – יצירת בוט בטלגרם
 1. בטלגרם, פתח צ'אט עם **@BotFather**
@@ -11,11 +11,14 @@
 ## שלב 3 – התקנה ב-Termux
 ```bash
 pkg update && pkg upgrade -y
-pkg install python git -y
+pkg install python git python-numpy python-onnxruntime python-scipy python-pillow -y
 git clone https://github.com/benny054727/HTML.git bot
 cd bot
 pip install -r requirements.txt
+python download_models.py
 ```
+
+`download_models.py` מוריד כ-850MB של מודלים לתיקייה `models/` ובודק שהם תקינים.
 
 ## שלב 4 – הגדרת הטוקן
 ```bash
@@ -45,4 +48,15 @@ python bot.py
 | `/help` | רשימת פקודות |
 | `/time` | השעה עכשיו |
 | `/id` | ה-ID שלך |
+| `/swap` | החלפת פנים: תמונה מקורית ואז תמונת יעד |
+| `/cancel` | ביטול החלפה באמצע |
 | טקסט רגיל | הבוט מחזיר אותו |
+
+## החלפת פנים
+1. שולחים `/swap`
+2. שולחים **תמונה מקורית** - ממנה נלקחות הפנים (הפנים הגדולות בתמונה)
+3. שולחים **תמונת יעד** - הפנים הגדולות בה מוחלפות
+
+⚠️ השתמש רק בתמונות של אנשים שהסכימו לכך.
+
+המודלים (InsightFace: SCRFD, ArcFace, inswapper_128) מותרים לשימוש אישי ולא מסחרי בלבד.

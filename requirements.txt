@@ -1,1 +1,2 @@
 python-telegram-bot==22.8
+# numpy, onnxruntime, scipy, Pillow - מותקנים ב-Termux דרך pkg (ראה README)

@@ -1,5 +1,6 @@
-"""בוט טלגרם בסיסי - מותאם להרצה ב-Termux."""
+"""בוט טלגרם להחלפת פנים בתמונות - מותאם להרצה ב-Termux."""
 
+import asyncio
 import logging
 import os
 import re
@@ -23,6 +24,21 @@ logging.basicConfig(
 logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger(__name__)
 
+CONSENT = "⚠️ השתמש רק בתמונות של אנשים שהסכימו לכך."
+
+# המודלים נטענים פעם אחת, בפעם הראשונה שמישהו מבקש החלפה
+_swapper = None
+_swap_lock = asyncio.Lock()
+
+
+def _load_swapper():
+    global _swapper
+    if _swapper is None:
+        import faceswap  # נטען רק כשצריך, כי זה כבד
+
+        _swapper = faceswap.FaceSwapper()
+    return _swapper
+
 
 def load_env(path: str = ".env") -> None:
     """טוען משתנים מקובץ .env (בלי ספריות נוספות)."""
@@ -40,7 +56,9 @@ def load_env(path: str = ".env") -> None:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     name = update.effective_user.first_name
     await update.message.reply_text(
-        f"שלום {name}! 👋\nאני בוט שרץ מהטלפון דרך Termux.\nשלח /help לרשימת הפקודות."
+        f"שלום {name}! 👋\nאני בוט להחלפת פנים בתמונות.\n"
+        "🔄 שלח /swap כדי להתחיל.\n"
+        f"{CONSENT}"
     )
 
 
@@ -50,8 +68,15 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/start - הודעת פתיחה\n"
         "/help - העזרה הזו\n"
         "/time - השעה עכשיו\n"
-        "/id - ה-ID שלך בטלגרם\n\n"
-        "כל הודעה אחרת - אחזיר לך אותה."
+        "/id - ה-ID שלך בטלגרם\n"
+        "/swap - החלפת פנים\n"
+        "/cancel - ביטול החלפה באמצע\n\n"
+        "🔄 איך מחליפים פנים:\n"
+        "1. שולחים /swap\n"
+        "2. שולחים תמונה מקורית - ממנה נלקחות הפנים\n"
+        "3. שולחים תמונת יעד - אליה מועברות הפנים\n"
+        "מקבלים את תמונת היעד עם הפנים מהתמונה המקורית.\n\n"
+        f"{CONSENT}"
     )
 
 
@@ -64,6 +89,69 @@ async def id_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         f"ה-ID שלך: {update.effective_user.id}\nה-ID של הצ'אט: {update.effective_chat.id}"
     )
+
+
+async def swap_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data.clear()
+    context.user_data["step"] = "source"
+    await update.message.reply_text(
+        "🔄 החלפת פנים\n\n"
+        "1️⃣ שלח עכשיו את התמונה המקורית - ממנה אקח את הפנים.\n\n"
+        f"{CONSENT}\n"
+        "לביטול: /cancel"
+    )
+
+
+async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data.clear()
+    await update.message.reply_text("❌ בוטל. לחזרה: /swap")
+
+
+async def _download(update: Update) -> bytes:
+    msg = update.message
+    file = await (msg.photo[-1] if msg.photo else msg.document).get_file()
+    return bytes(await file.download_as_bytearray())
+
+
+async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    msg = update.message
+    step = context.user_data.get("step")
+
+    if step == "source":
+        context.user_data["source"] = await _download(update)
+        context.user_data["step"] = "target"
+        await msg.reply_text("✅ קיבלתי.\n\n2️⃣ עכשיו שלח את תמונת היעד - אליה אעביר את הפנים.")
+        return
+
+    if step != "target":
+        await msg.reply_text("כדי להחליף פנים, שלח קודם /swap")
+        return
+
+    source = context.user_data["source"]
+    target = await _download(update)
+    context.user_data.clear()
+
+    status = await msg.reply_text("⏳ מחליף פנים... (בפעם הראשונה זה לוקח קצת יותר, כי המודלים נטענים)")
+    await msg.chat.send_action("upload_photo")
+    try:
+        async with _swap_lock:  # אחד בכל פעם, כדי לא להעמיס על הטלפון
+            swapper = await asyncio.to_thread(_load_swapper)
+            result, _ = await asyncio.to_thread(swapper.swap_faces, source, target, False)
+    except FileNotFoundError:
+        log.exception("חסרים מודלים")
+        await status.edit_text("❌ חסרים קבצי המודלים. ב-Termux הרץ: python download_models.py")
+        return
+    except Exception as e:
+        if type(e).__name__ == "NoFaceError":
+            which = "המקורית" if str(e) == "source" else "היעד"
+            await status.edit_text(f"😕 לא מצאתי פנים בתמונה {which}. נסה תמונה אחרת: /swap")
+        else:
+            log.exception("החלפת פנים נכשלה")
+            await status.edit_text("❌ משהו השתבש. נסה שוב: /swap")
+        return
+
+    await status.delete()
+    await msg.reply_photo(result, caption="✅ הנה! להחלפה נוספת: /swap")
 
 
 async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -83,6 +171,9 @@ def main() -> None:
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("time", time_cmd))
     app.add_handler(CommandHandler("id", id_cmd))
+    app.add_handler(CommandHandler("swap", swap_cmd))
+    app.add_handler(CommandHandler("cancel", cancel_cmd))
+    app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, on_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
 
     log.info("הבוט רץ! לעצירה: Ctrl+C")
