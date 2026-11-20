@@ -1,4 +1,4 @@
-# בוט טלגרם לעריכת תמונות ב-Python שרץ בטלפון (Termux)
+# בוט טלגרם ב-Python שרץ בטלפון (Termux)
 
 ## שלב 1 – יצירת בוט בטלגרם
 1. בטלגרם, פתח צ'אט עם **@BotFather**
@@ -11,7 +11,7 @@
 ## שלב 3 – התקנה ב-Termux
 ```bash
 pkg update && pkg upgrade -y
-pkg install python git python-pillow -y
+pkg install python git -y
 git clone https://github.com/benny054727/HTML.git bot
 cd bot
 pip install -r requirements.txt
@@ -45,5 +45,4 @@ python bot.py
 | `/help` | רשימת פקודות |
 | `/time` | השעה עכשיו |
 | `/id` | ה-ID שלך |
-| 📷 תמונה | כפתורי עריכה: שחור-לבן, ספיה, בהירות, ניגודיות, חידוד, טשטוש, סיבוב, מראה, חיתוך, הקטנה |
 | טקסט רגיל | הבוט מחזיר אותו |
