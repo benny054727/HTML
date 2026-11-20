@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 from telegram import Update
+from telegram.error import InvalidToken
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -82,7 +83,12 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
 
     log.info("הבוט רץ! לעצירה: Ctrl+C")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    try:
+        app.run_polling(allowed_updates=Update.ALL_TYPES)
+    except InvalidToken:
+        raise SystemExit(
+            "❌ טלגרם דחה את הטוקן. בדוק ב-.env שהדבקת את הטוקן העדכני מ-@BotFather, בלי רווחים או תווים מיותרים."
+        ) from None
 
 
 if __name__ == "__main__":
