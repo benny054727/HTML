@@ -810,7 +810,22 @@ async def post_init(app: Application) -> None:
         await _set_owner_commands(app)
 
 
+def _already_running() -> int | None:
+    """אם הבוט כבר רץ דרך run.sh (למשל ברקע) - מחזיר את ה-pid שלו."""
+    pidfile = Path(__file__).parent / "bot.pid"
+    try:
+        pid = int(pidfile.read_text().strip())
+        os.kill(pid, 0)  # רק בודק שהתהליך קיים
+    except (OSError, ValueError):
+        return None
+    return None if pid == os.getppid() else pid  # run.sh שהפעיל אותנו - זה בסדר
+
+
 def main() -> None:
+    other = _already_running()
+    if other:
+        # באנגלית, כי Termux מציג עברית הפוך
+        raise SystemExit(f"The bot is already running (pid {other}). To stop it: ./stop.sh")
     load_env()
     # מנקה תווים נסתרים שנכנסים לפעמים בהדבקה (למשל ב-Termux)
     match = re.search(r"\d+:[A-Za-z0-9_-]{30,}", os.environ.get("BOT_TOKEN", ""))

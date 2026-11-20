@@ -5,3 +5,5 @@ bot.log
 models/
 access.json
 access.tmp
+bot.pid
+bot.log.1
