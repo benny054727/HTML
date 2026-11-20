@@ -99,12 +99,12 @@ VIDEO_MODE_INFO = {
 }
 VIDEO_MODE_SHORT = {"fast": "מהיר", "quality": "איכותי"}
 
-DEFAULT_GLASSES = "auto"
+DEFAULT_GLASSES = "always"  # איכות מלאה כברירת מחדל
 GLASSES_INFO = {
-    "auto": "אוטומטי - מוחק משקפיים רק כשמזהה אותם (מהיר)",
-    "always": "תמיד למחוק - בטוח, אבל איטי בערך פי 3",
+    "always": "איכות מלאה - תמיד שני שלבי החלפה (מדויק, איטי יותר)",
+    "auto": "מהיר - שלב מחיקת המשקפיים רק כשמזוהים משקפיים (דמיון קצת פחות מדויק)",
 }
-GLASSES_SHORT = {"auto": "אוטומטי", "always": "תמיד"}
+GLASSES_SHORT = {"always": "מלאה", "auto": "מהירה"}
 
 
 def _enhance(context) -> str:
@@ -141,7 +141,7 @@ def home_keyboard(context) -> InlineKeyboardMarkup:
         [btn(f"✨ חידוד: {ENHANCE_SHORT[_enhance(context)]}", "menu:enhance"),
          btn(f"🎨 צבע עור: {_color(context)}%", "menu:color")],
         [btn(f"⚙️ סרטון: {VIDEO_MODE_SHORT[_video_mode(context)]}", "menu:vmode"),
-         btn(f"👓 משקפיים: {GLASSES_SHORT[_glasses(context)]}", "menu:glasses")],
+         btn(f"👓 איכות: {GLASSES_SHORT[_glasses(context)]}", "menu:glasses")],
         [btn("❓ עזרה", "help")],
     ])
 
@@ -169,9 +169,9 @@ def settings_menu(context, which: str) -> tuple[str, InlineKeyboardMarkup]:
     elif which == "glasses":
         cur = _glasses(context)
         rows = [[btn(_mark(k == cur, v), f"set:glasses:{k}")] for k, v in GLASSES_INFO.items()]
-        text = ("👓 מחיקת משקפיים:\n"
-                "השלב שמוחק משקפיים הוא הכי איטי. באוטומטי הבוט מריץ אותו רק כשהוא מזהה משקפיים.\n"
-                "אם נשארו 'שאריות' משקפיים - בחר 'תמיד למחוק'.")
+        text = ("👓 איכות ההחלפה:\n"
+                "באיכות מלאה הפנים עוברות שני שלבים: מחיקת משקפיים וחיזוק הדמיון, ואז ההחלפה.\n"
+                "במצב מהיר השלב הראשון רץ רק כשמזוהים משקפיים - מהיר בערך פי 2, אבל הדמיון פחות מדויק.")
     else:
         cur = _video_mode(context)
         rows = [[btn(_mark(k == cur, v), f"set:vmode:{k}")] for k, v in VIDEO_MODE_INFO.items()]
@@ -192,7 +192,7 @@ HELP_TEXT = (
     "4. מקבלים תצוגה מקדימה של פריים אחד - ולוחצים 'המשך' או 'בטל'\n"
     "אפשר לעצור עיבוד באמצע עם '⛔ עצור עיבוד'.\n\n"
     "🙂 הבוט זוכר את התמונה המקורית האחרונה - אפשר להשתמש בה שוב בלחיצה.\n\n"
-    "⚙️ ההגדרות (חידוד, צבע עור, מצב סרטון, משקפיים) נשמרות עד שמשנים אותן.\n\n"
+    "⚙️ ההגדרות (חידוד, צבע עור, מצב סרטון, איכות) נשמרות עד שמשנים אותן.\n\n"
     "פקודות: /swap /swapvideo /enhance /color /videomode /cancel\n\n"
     f"{CONSENT}"
 )
@@ -625,10 +625,10 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 def _glasses_line(job: dict) -> str:
     if job["glasses"] == "always":
-        return "👓 מחיקת משקפיים: תמיד (לפי ההגדרה)"
+        return "👓 איכות מלאה"
     if job["remove_glasses"]:
-        return "👓 זוהו משקפיים - הבוט ימחק אותם (איטי יותר)"
-    return "🙂 לא זוהו משקפיים - מצב מהיר (אם נשארו שאריות משקפיים: 👓 'תמיד למחוק')"
+        return "👓 מצב מהיר: זוהו משקפיים - הבוט ימחק אותם"
+    return "⚡ מצב מהיר: לא זוהו משקפיים (לדמיון מדויק יותר: 👓 'איכות מלאה')"
 
 
 def _drop_video_job(context) -> None:
@@ -843,7 +843,7 @@ COMMANDS = [
     BotCommand("enhance", "בחירת חידוד פנים"),
     BotCommand("color", "העברת צבע עור (0-100)"),
     BotCommand("videomode", "מצב סרטונים: מהיר/איכותי"),
-    BotCommand("glasses", "מחיקת משקפיים: אוטומטי/תמיד"),
+    BotCommand("glasses", "איכות ההחלפה: always (מלאה) / auto (מהיר)"),
     BotCommand("cancel", "ביטול / עצירת עיבוד"),
     BotCommand("help", "עזרה"),
 ]
