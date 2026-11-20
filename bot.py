@@ -159,8 +159,8 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     except Exception as e:
         if type(e).__name__ == "NoFaceError":
-            which = "המקורית" if str(e) == "source" else "היעד"
-            await status.edit_text(f"😕 לא מצאתי פנים בתמונה {which}. נסה תמונה אחרת: /swap")
+            which = "בתמונה המקורית" if str(e) == "source" else "בתמונת היעד"
+            await status.edit_text(f"😕 לא מצאתי פנים {which}. נסה תמונה אחרת: /swap")
         else:
             log.exception("החלפת פנים נכשלה")
             await status.edit_text("❌ משהו השתבש. נסה שוב: /swap")

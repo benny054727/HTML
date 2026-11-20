@@ -1,9 +1,9 @@
-"""החלפת פנים עם מודלי ONNX (InsightFace) - בלי OpenCV, רק numpy / Pillow / scipy.
+"""החלפת פנים עם מודלי ONNX - בלי OpenCV, רק numpy / Pillow / scipy.
 
 שלושה מודלים בתיקייה models/:
   det_10g.onnx       - זיהוי פנים (SCRFD)
   w600k_r50.onnx     - "טביעת אצבע" של פנים (ArcFace)
-  inswapper_128.onnx - המודל שמחליף את הפנים
+  hyperswap_1a_256.onnx - המודל שמחליף את הפנים (FaceFusion HyperSwap, 256x256)
   gfpgan_1.4.onnx    - שחזור וחידוד פנים אחרי ההחלפה (רשות)
 """
 
@@ -25,6 +25,13 @@ ARCFACE_DST = np.array(
     dtype=np.float32,
 )
 
+
+# מיקום 5 נקודות הפנים בתבנית של HyperSwap, כשבר מגודל התמונה
+ARCFACE_128 = np.array(
+    [[0.36167656, 0.40387734], [0.63696719, 0.40235469], [0.50019687, 0.56044219],
+     [0.38710391, 0.72160547], [0.61507734, 0.72034453]],
+    dtype=np.float64,
+)
 
 # מיקום 5 נקודות הפנים בתבנית FFHQ (בשביל GFPGAN), כשבר מגודל התמונה
 FFHQ_DST = np.array(
@@ -78,73 +85,11 @@ def _align_matrix(kps: np.ndarray, size: int) -> np.ndarray:
     return _similarity(kps.astype(np.float64), dst.astype(np.float64))
 
 
-# ---------- קריאת מטריצת emap מתוך קובץ ה-ONNX (בלי הספרייה onnx) ----------
-
-def _varint(buf: memoryview, pos: int) -> tuple[int, int]:
-    result = shift = 0
-    while True:
-        b = buf[pos]
-        pos += 1
-        result |= (b & 0x7F) << shift
-        if not b & 0x80:
-            return result, pos
-        shift += 7
-
-
-def _fields(buf: memoryview, start: int, end: int):
-    """עובר על שדות protobuf ומחזיר (מספר שדה, סוג, ערך/טווח)."""
-    pos = start
-    while pos < end:
-        key, pos = _varint(buf, pos)
-        field, wtype = key >> 3, key & 7
-        if wtype == 0:
-            val, pos = _varint(buf, pos)
-            yield field, wtype, val
-        elif wtype == 1:
-            yield field, wtype, (pos, pos + 8)
-            pos += 8
-        elif wtype == 2:
-            ln, pos = _varint(buf, pos)
-            yield field, wtype, (pos, pos + ln)
-            pos += ln
-        elif wtype == 5:
-            yield field, wtype, (pos, pos + 4)
-            pos += 4
-        else:
-            raise ValueError("protobuf לא תקין")
-
-
-def _load_emap(path: Path) -> np.ndarray:
-    """ה-emap הוא ה-initializer האחרון בגרף של inswapper (מטריצה 512x512)."""
-    data = path.read_bytes()
-    buf = memoryview(data)
-    graph = next(v for f, w, v in _fields(buf, 0, len(buf)) if f == 7 and w == 2)
-    last = None
-    for f, w, v in _fields(buf, *graph):
-        if f == 5 and w == 2:  # initializer
-            last = v
-    dims, raw = [], None
-    for f, w, v in _fields(buf, *last):
-        if f == 1:
-            if w == 0:
-                dims.append(v)
-            else:  # packed
-                p = v[0]
-                while p < v[1]:
-                    d, p = _varint(buf, p)
-                    dims.append(d)
-        elif f == 9 and w == 2:
-            raw = bytes(buf[v[0]:v[1]])
-    if dims != [512, 512] or raw is None:
-        raise ValueError(f"emap לא נמצא בקובץ המודל (dims={dims})")
-    return np.frombuffer(raw, dtype=np.float32).reshape(512, 512).copy()
-
-
 # ---------- המודלים ----------
 
 class FaceSwapper:
     def __init__(self, models_dir: Path = MODELS_DIR):
-        names = ("det_10g.onnx", "w600k_r50.onnx", "inswapper_128.onnx")
+        names = ("det_10g.onnx", "w600k_r50.onnx", "hyperswap_1a_256.onnx")
         missing = [n for n in names if not (models_dir / n).is_file()]
         if missing:
             raise FileNotFoundError(", ".join(missing))
@@ -153,9 +98,7 @@ class FaceSwapper:
         prov = ["CPUExecutionProvider"]
         self.det = ort.InferenceSession(str(models_dir / "det_10g.onnx"), opts, providers=prov)
         self.rec = ort.InferenceSession(str(models_dir / "w600k_r50.onnx"), opts, providers=prov)
-        swap_path = models_dir / "inswapper_128.onnx"
-        self.swap = ort.InferenceSession(str(swap_path), opts, providers=prov)
-        self.emap = _load_emap(swap_path)
+        self.swap = ort.InferenceSession(str(models_dir / "hyperswap_1a_256.onnx"), opts, providers=prov)
         # מודל השחזור הוא רשות - אם הוא לא הורד, פשוט מדלגים עליו
         enh_path = models_dir / "gfpgan_1.4.onnx"
         self.enhancer = ort.InferenceSession(str(enh_path), opts, providers=prov) if enh_path.is_file() else None
@@ -266,13 +209,13 @@ class FaceSwapper:
         return target
 
     # --- החלפה ---
-    def _swap_one(self, img: Image.Image, target: np.ndarray, kps: np.ndarray, latent: np.ndarray) -> np.ndarray:
-        m = _align_matrix(kps, 128)
-        aligned = _warp(img, m, (128, 128))
-        blob = (np.asarray(aligned, dtype=np.float32) / 255.0).transpose(2, 0, 1)[None]
-        out = self.swap.run(None, {"target": blob, "source": latent})[0][0]
-        fake = Image.fromarray((out.transpose(1, 2, 0).clip(0, 1) * 255).astype(np.uint8))
-        return self._paste(target, fake, m)
+    def _swap_one(self, img: Image.Image, target: np.ndarray, kps: np.ndarray, emb: np.ndarray) -> np.ndarray:
+        m = _similarity(kps.astype(np.float64), ARCFACE_128 * 256)
+        crop = np.asarray(_warp(img, m, (256, 256)), dtype=np.float32)
+        blob = ((crop / 255.0 - 0.5) / 0.5).transpose(2, 0, 1)[None]
+        out = self.swap.run(None, {"source": emb, "target": blob})[0][0]
+        face = ((out.transpose(1, 2, 0) * 0.5 + 0.5).clip(0, 1) * 255).astype(np.uint8)
+        return self._paste(target, Image.fromarray(face), m)
 
     # --- שחזור פנים (GFPGAN) ---
     def _enhance_one(self, target: np.ndarray, kps: np.ndarray) -> np.ndarray:
@@ -294,9 +237,7 @@ class FaceSwapper:
         src_faces = self.detect(np.asarray(src_img))
         if not src_faces:
             raise NoFaceError("source")
-        emb = self.embedding(src_img, src_faces[0][1])
-        latent = (emb[None] @ self.emap)
-        latent = (latent / np.linalg.norm(latent)).astype(np.float32)
+        emb = self.embedding(src_img, src_faces[0][1])[None].astype(np.float32)
 
         tgt_img = _open(target)
         tgt_faces = self.detect(np.asarray(tgt_img))
@@ -307,7 +248,7 @@ class FaceSwapper:
 
         result = np.asarray(tgt_img, dtype=np.float32).copy()
         for _, kps, _ in tgt_faces:
-            result = self._swap_one(tgt_img, result, kps, latent)
+            result = self._swap_one(tgt_img, result, kps, emb)
         if enhance and self.enhancer is not None:
             for _, kps, _ in tgt_faces:
                 result = self._enhance_one(result, kps)

@@ -18,7 +18,7 @@ pip install -r requirements.txt
 python download_models.py
 ```
 
-`download_models.py` מוריד כ-1.2GB של מודלים לתיקייה `models/` ובודק שהם תקינים.
+`download_models.py` מוריד כ-1GB של מודלים לתיקייה `models/` ובודק שהם תקינים.
 
 ## שלב 4 – הגדרת הטוקן
 ```bash
@@ -62,4 +62,4 @@ python bot.py
 
 אחרי ההחלפה הפנים עוברות חידוד עם GFPGAN (אפשר לכבות עם `/enhance`).
 
-המודלים (InsightFace: SCRFD, ArcFace, inswapper_128; GFPGAN) מותרים לשימוש אישי ולא מסחרי בלבד.
+המודלים (InsightFace: SCRFD, ArcFace; FaceFusion: HyperSwap 1a; GFPGAN) מותרים לשימוש אישי ולא מסחרי בלבד (HyperSwap: רישיון ResearchRAIL).
