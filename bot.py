@@ -94,10 +94,17 @@ COLOR_CHOICES = (0, 30, 60, 100)
 
 DEFAULT_VIDEO_MODE = "fast"
 VIDEO_MODE_INFO = {
-    "fast": "מהיר - 15 פריימים לשנייה, עד 720p, בלי חידוד",
+    "fast": "מהיר - 10 פריימים לשנייה, עד 720p, בלי חידוד",
     "quality": "איכותי - עד 30 פריימים לשנייה, עד 1080p, עם החידוד שנבחר (איטי מאוד!)",
 }
 VIDEO_MODE_SHORT = {"fast": "מהיר", "quality": "איכותי"}
+
+DEFAULT_GLASSES = "auto"
+GLASSES_INFO = {
+    "auto": "אוטומטי - מוחק משקפיים רק כשמזהה אותם (מהיר)",
+    "always": "תמיד למחוק - בטוח, אבל איטי בערך פי 3",
+}
+GLASSES_SHORT = {"auto": "אוטומטי", "always": "תמיד"}
 
 
 def _enhance(context) -> str:
@@ -110,6 +117,10 @@ def _color(context) -> int:
 
 def _video_mode(context) -> str:
     return context.chat_data.get("video_mode", DEFAULT_VIDEO_MODE)
+
+
+def _glasses(context) -> str:
+    return context.chat_data.get("glasses", DEFAULT_GLASSES)
 
 
 # ---------- מקלדות (כפתורים) ----------
@@ -129,7 +140,9 @@ def home_keyboard(context) -> InlineKeyboardMarkup:
         [btn("📸 החלפה בתמונה", "go:photo"), btn("🎬 החלפה בסרטון", "go:video")],
         [btn(f"✨ חידוד: {ENHANCE_SHORT[_enhance(context)]}", "menu:enhance"),
          btn(f"🎨 צבע עור: {_color(context)}%", "menu:color")],
-        [btn(f"⚙️ סרטון: {VIDEO_MODE_SHORT[_video_mode(context)]}", "menu:vmode"), btn("❓ עזרה", "help")],
+        [btn(f"⚙️ סרטון: {VIDEO_MODE_SHORT[_video_mode(context)]}", "menu:vmode"),
+         btn(f"👓 משקפיים: {GLASSES_SHORT[_glasses(context)]}", "menu:glasses")],
+        [btn("❓ עזרה", "help")],
     ])
 
 
@@ -153,6 +166,12 @@ def settings_menu(context, which: str) -> tuple[str, InlineKeyboardMarkup]:
         text = ("🎨 כמה מצבע העור של התמונה המקורית להעביר?\n"
                 "0% = הצבע של תמונת היעד, 100% = הצבע של התמונה המקורית.\n"
                 "(ערך אחר: /color 45)")
+    elif which == "glasses":
+        cur = _glasses(context)
+        rows = [[btn(_mark(k == cur, v), f"set:glasses:{k}")] for k, v in GLASSES_INFO.items()]
+        text = ("👓 מחיקת משקפיים:\n"
+                "השלב שמוחק משקפיים הוא הכי איטי. באוטומטי הבוט מריץ אותו רק כשהוא מזהה משקפיים.\n"
+                "אם נשארו 'שאריות' משקפיים - בחר 'תמיד למחוק'.")
     else:
         cur = _video_mode(context)
         rows = [[btn(_mark(k == cur, v), f"set:vmode:{k}")] for k, v in VIDEO_MODE_INFO.items()]
@@ -173,7 +192,7 @@ HELP_TEXT = (
     "4. מקבלים תצוגה מקדימה של פריים אחד - ולוחצים 'המשך' או 'בטל'\n"
     "אפשר לעצור עיבוד באמצע עם '⛔ עצור עיבוד'.\n\n"
     "🙂 הבוט זוכר את התמונה המקורית האחרונה - אפשר להשתמש בה שוב בלחיצה.\n\n"
-    "⚙️ ההגדרות (חידוד, צבע עור, מצב סרטון) נשמרות עד שמשנים אותן.\n\n"
+    "⚙️ ההגדרות (חידוד, צבע עור, מצב סרטון, משקפיים) נשמרות עד שמשנים אותן.\n\n"
     "פקודות: /swap /swapvideo /enhance /color /videomode /cancel\n\n"
     f"{CONSENT}"
 )
@@ -448,6 +467,16 @@ async def color_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(f"🎨 העברת צבע עור: {value}%", reply_markup=BACK_HOME_KB)
 
 
+async def glasses_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    choice = context.args[0].lower() if context.args else None
+    if choice in GLASSES_INFO:
+        context.chat_data["glasses"] = choice
+        await update.message.reply_text(f"👓 משקפיים: {GLASSES_INFO[choice]}", reply_markup=BACK_HOME_KB)
+        return
+    text, kb = settings_menu(context, "glasses")
+    await update.message.reply_text(("❌ אפשרות לא מוכרת.\n\n" if choice else "") + text, reply_markup=kb)
+
+
 async def videomode_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     choice = context.args[0].lower() if context.args else None
     if choice in VIDEO_MODE_INFO:
@@ -507,8 +536,10 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             context.chat_data["color"] = int(value)
         elif key == "vmode" and value in VIDEO_MODE_INFO:
             context.chat_data["video_mode"] = value
+        elif key == "glasses" and value in GLASSES_INFO:
+            context.chat_data["glasses"] = value
         # מציגים שוב את אותו תפריט, עם ✅ על הבחירה החדשה
-        text, kb = settings_menu(context, {"enhance": "enhance", "color": "color", "vmode": "vmode"}[key])
+        text, kb = settings_menu(context, key)
         try:
             await query.edit_message_text(text, reply_markup=kb)
         except BadRequest:
@@ -561,7 +592,9 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             color = _color(context) / 100
             # אם מודל החידוד שנבחר לא הורד - מחליפים בלי חידוד ומודיעים
             missing = enhance if enhance and await asyncio.to_thread(swapper.enhancer, enhance) is None else None
-            result, _ = await asyncio.to_thread(swapper.swap_faces, source, target, False, enhance, color)
+            remove_glasses = True if _glasses(context) == "always" else None  # None = אוטומטי
+            result, _ = await asyncio.to_thread(swapper.swap_faces, source, target, False, enhance, color,
+                                                remove_glasses)
     except FileNotFoundError as e:
         log.error("חסרים קבצי מודלים: %s", e)
         await status.edit_text(
@@ -589,6 +622,14 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # ---------- קבלת סרטונים ----------
+
+def _glasses_line(job: dict) -> str:
+    if job["glasses"] == "always":
+        return "👓 מחיקת משקפיים: תמיד (לפי ההגדרה)"
+    if job["remove_glasses"]:
+        return "👓 זוהו משקפיים - הבוט ימחק אותם (איטי יותר)"
+    return "🙂 לא זוהו משקפיים - מצב מהיר (אם נשארו שאריות משקפיים: 👓 'תמיד למחוק')"
+
 
 def _drop_video_job(context) -> None:
     """מוחק סרטון שמחכה לאישור תצוגה מקדימה (והקבצים שלו)."""
@@ -618,6 +659,7 @@ async def on_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "mode": _video_mode(context),
         "enhance": None if _enhance(context) == "off" else _enhance(context),
         "color": _color(context) / 100,
+        "glasses": _glasses(context),
         "workdir": Path(tempfile.mkdtemp(prefix="swapvideo_")),
     }
     job["in_path"] = job["workdir"] / "in.mp4"
@@ -640,8 +682,9 @@ async def on_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             import video  # noqa: E402 - נטען רק כשצריך
 
             src = await asyncio.to_thread(swapper.prepare_source, job["source"])
-            preview, sec_per_frame, total = await asyncio.to_thread(
-                video.preview_frame, swapper, src, job["in_path"], job["mode"], job["enhance"], job["color"])
+            preview, sec_per_frame, total, job["remove_glasses"] = await asyncio.to_thread(
+                video.preview_frame, swapper, src, job["in_path"], job["mode"], job["enhance"], job["color"],
+                job["glasses"])
         if cancel.is_set():
             raise _Stopped()
         minutes = max(1, round(sec_per_frame * total * 1.15 / 60))  # +15% לפירוק והרכבה
@@ -651,6 +694,7 @@ async def on_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await msg.reply_photo(
             preview,
             caption=(f"👀 תצוגה מקדימה - ככה ייראו הפנים בסרטון.\n\n"
+                     f"{_glasses_line(job)}\n"
                      f"⏱️ עיבוד הסרטון המלא: {total} פריימים, בערך {minutes} דק'.\n"
                      "להמשיך?"),
             reply_markup=InlineKeyboardMarkup([[btn("✅ המשך לסרטון המלא", "vjob:go"),
@@ -721,7 +765,8 @@ async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE, job:
 
             try:
                 info = await asyncio.to_thread(video.swap_video, swapper, src, job["in_path"], out_path,
-                                               job["mode"], job["enhance"], job["color"], progress, cancel)
+                                               job["mode"], job["enhance"], job["color"], progress, cancel,
+                                               job["remove_glasses"])
             except Exception:
                 await _flush(pending)
                 raise
@@ -798,6 +843,7 @@ COMMANDS = [
     BotCommand("enhance", "בחירת חידוד פנים"),
     BotCommand("color", "העברת צבע עור (0-100)"),
     BotCommand("videomode", "מצב סרטונים: מהיר/איכותי"),
+    BotCommand("glasses", "מחיקת משקפיים: אוטומטי/תמיד"),
     BotCommand("cancel", "ביטול / עצירת עיבוד"),
     BotCommand("help", "עזרה"),
 ]
@@ -871,6 +917,7 @@ def main() -> None:
     app.add_handler(CommandHandler("enhance", enhance_cmd))
     app.add_handler(CommandHandler("color", color_cmd))
     app.add_handler(CommandHandler("videomode", videomode_cmd))
+    app.add_handler(CommandHandler("glasses", glasses_cmd))
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, on_photo))
     app.add_handler(MessageHandler(

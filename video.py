@@ -11,16 +11,17 @@ import faceswap as fs
 
 MAX_SECONDS = 15  # סרטון ארוך יותר נחתך
 
-# fast: מהיר (15 פריימים לשנייה, עד 720p, בלי חידוד)
+# fast: מהיר (10 פריימים לשנייה, עד 720p, בלי חידוד)
 # quality: איכותי (עד 30 פריימים לשנייה, עד 1080p, עם מודל החידוד שנבחר ב-/enhance)
 MODES = {
-    "fast": {"fps": 15, "short_side": 720, "enhance": False},
+    "fast": {"fps": 10, "short_side": 720, "enhance": False},
     "quality": {"fps": 30, "short_side": 1080, "enhance": True},
 }
 
 KPS_SMOOTH = 0.6   # כמה לסמוך על המיקום החדש של הפנים (פחות = פחות רעידות, אבל יותר "גרירה")
 STATS_SMOOTH = 0.2  # כמה מהר צבע העור מתעדכן בין פריימים (נמוך = בלי הבהובים)
 HOLD_FRAMES = 3    # כמה פריימים להמשיך עם המיקום האחרון אם הפנים לא זוהו לרגע
+GLASSES_CHECKS = 5  # בכמה פריימים לאורך הסרטון לבדוק אם יש משקפיים
 
 
 class FfmpegMissing(Exception):
@@ -70,10 +71,12 @@ def _out_size(w: int, h: int, short_side: int) -> tuple[int, int]:
 
 
 def preview_frame(swapper: fs.FaceSwapper, src: fs.Source, in_path: Path, mode: str = "fast",
-                  enhance: str | None = None, color: float = 0.6) -> tuple[bytes, float, int]:
+                  enhance: str | None = None, color: float = 0.6,
+                  glasses: str = "auto") -> tuple[bytes, float, int, bool]:
     """מחליף פנים בפריים אחד (הראשון שיש בו פנים) - לתצוגה מקדימה לפני כל הסרטון.
 
-    מחזיר (JPEG, כמה שניות לקח הפריים, כמה פריימים יהיו בסרטון) - בשביל הערכת זמן.
+    glasses: "auto" = בודקים אם יש משקפיים לאורך הסרטון; "always" = תמיד מוחקים.
+    מחזיר (JPEG, כמה שניות לקח הפריים, כמה פריימים יהיו בסרטון, האם למחוק משקפיים).
     """
     import time
     from io import BytesIO
@@ -86,36 +89,50 @@ def preview_frame(swapper: fs.FaceSwapper, src: fs.Source, in_path: Path, mode: 
     total = max(1, int(round(seconds * fps)))
     enhance = enhance if cfg["enhance"] else None
 
-    # מחפשים פנים ב-2 פריימים לשנייה, בשניות הראשונות
+    # עוברים על הסרטון בפריים אחד לשנייה: הפריים הראשון עם פנים -> לתצוגה המקדימה,
+    # ובודקים משקפיים בכמה פריימים לאורך הסרטון (אם באחד מהם יש - מוחקים בכל הסרטון)
     decoder = subprocess.Popen(
         ["ffmpeg", "-v", "error", "-t", str(MAX_SECONDS), "-i", str(in_path),
-         "-vf", f"fps=2,scale={w}:{h}", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+         "-vf", f"fps=1,scale={w}:{h}", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    first = None
+    remove_glasses = glasses == "always"
+    checked = 0
     try:
         while True:
             raw = decoder.stdout.read(w * h * 3)
             if len(raw) < w * h * 3:
-                raise NoFaceInVideo()
+                break
             img = Image.frombytes("RGB", (w, h), raw)
             faces = swapper.detect(np.asarray(img))
-            if faces:
+            if not faces:
+                continue
+            if first is None:
+                first = (img, faces[:1])
+            if remove_glasses or checked >= GLASSES_CHECKS:
                 break
+            checked += 1
+            remove_glasses = swapper.has_glasses(img, faces[0])
     finally:
         if decoder.poll() is None:
             decoder.kill()
             decoder.wait()
+    if first is None:
+        raise NoFaceInVideo()
 
+    img, faces = first
     started = time.monotonic()
-    result, _ = swapper.swap_image(src, img, faces[:1], enhance, color, redetect=False)
+    result, _ = swapper.swap_image(src, img, faces, enhance, color, redetect=False,
+                                   remove_glasses=remove_glasses)
     took = time.monotonic() - started
     out = BytesIO()
     Image.fromarray(result.clip(0, 255).astype(np.uint8)).save(out, "JPEG", quality=92)
-    return out.getvalue(), took, total
+    return out.getvalue(), took, total, remove_glasses
 
 
 def swap_video(swapper: fs.FaceSwapper, src: fs.Source, in_path: Path, out_path: Path,
                mode: str = "fast", enhance: str | None = None, color: float = 0.6,
-               progress=None, cancel=None) -> dict:
+               progress=None, cancel=None, remove_glasses: bool = True) -> dict:
     """מחליף את הפנים הגדולות בכל פריים. progress(done, total) נקרא מדי פעם.
 
     cancel: threading.Event - אם הוא מופעל, העיבוד נעצר (Cancelled) והקובץ החלקי נמחק.
@@ -170,7 +187,8 @@ def swap_video(swapper: fs.FaceSwapper, src: fs.Source, in_path: Path, out_path:
 
             if kps_s is not None:
                 face = [(None, kps_s, 1.0)]
-                result, _ = swapper.swap_image(src, img, face, enhance, 0, redetect=False)
+                result, _ = swapper.swap_image(src, img, face, enhance, 0, redetect=False,
+                                               remove_glasses=remove_glasses)
                 if color > 0:
                     stats = fs._skin_stats(result, kps_s)
                     if stats is not None:

@@ -5,6 +5,7 @@
   w600k_r50.onnx     - "טביעת אצבע" של פנים (ArcFace)
   inswapper_128.onnx    - החלפה ראשונה: מוחקת משקפיים ודברים שמכסים את הפנים
   hyperswap_1a_256.onnx - החלפה שנייה: איכות ודמיון (FaceFusion HyperSwap, 256x256)
+  bisenet_resnet_18.onnx - זיהוי משקפיים (רשות: בלעדיו תמיד מוחקים משקפיים)
   gpen_bfr_512.onnx / restoreformer_plus_plus.onnx / gfpgan_1.4.onnx
                      - חידוד פנים אחרי ההחלפה (רשות, בוחרים אחד)
 """
@@ -48,6 +49,12 @@ ENHANCERS = {
     "restore": "restoreformer_plus_plus.onnx",
     "gfpgan": "gfpgan_1.4.onnx",
 }
+
+GLASSES_CLASS = 6          # במודל BiSeNet: 6 = משקפיים
+GLASSES_MIN_RATIO = 0.01   # מעל 1% מהפנים מסומן כמשקפיים -> יש משקפיים (בבדיקות: עם ~7.5%, בלי 0%)
+GLASSES_MIN_FACE = 48      # בפנים קטנות מזה הזיהוי לא אמין -> מוחקים תמיד, ליתר ביטחון
+_IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], np.float32)
+_IMAGENET_STD = np.array([0.229, 0.224, 0.225], np.float32)
 
 ENHANCE_BLEND = 0.8  # כמה מהשחזור לקחת (1.0 = הכל). קצת פחות נראה טבעי יותר
 
@@ -176,6 +183,7 @@ class FaceSwapper:
         # מודלי החידוד הם רשות - נטענים רק כשמבקשים אותם
         self._models_dir, self._opts, self._prov = models_dir, opts, prov
         self._enhancers: dict = {}
+        self._parser = None  # זיהוי משקפיים - נטען רק כשצריך
         self.det_in = self.det.get_inputs()[0].name
         self.rec_in = self.rec.get_inputs()[0].name
 
@@ -310,6 +318,23 @@ class FaceSwapper:
             self._enhancers[name] = ort.InferenceSession(str(path), self._opts, providers=self._prov)
         return self._enhancers[name]
 
+    # --- זיהוי משקפיים (BiSeNet) ---
+    def has_glasses(self, img: Image.Image, face) -> bool:
+        """האם לפנים האלה יש משקפיים. בספק (בלי מודל / פנים קטנות) - True, כדי למחוק ליתר ביטחון."""
+        bbox, kps, _ = face
+        if bbox is not None and (bbox[2] - bbox[0]) < GLASSES_MIN_FACE:
+            return True
+        if self._parser is None:
+            path = self._models_dir / "bisenet_resnet_18.onnx"
+            if not path.is_file():
+                return True
+            self._parser = ort.InferenceSession(str(path), self._opts, providers=self._prov)
+        m = _similarity(kps.astype(np.float64), ARCFACE_128 * 512)
+        crop = np.asarray(_warp(img, m, (512, 512)), dtype=np.float32) / 255.0
+        blob = ((crop - _IMAGENET_MEAN) / _IMAGENET_STD).transpose(2, 0, 1)[None]
+        classes = self._parser.run(None, {"input": blob})[0][0].argmax(0)
+        return float((classes == GLASSES_CLASS).mean()) > GLASSES_MIN_RATIO
+
     def _enhance_one(self, target: np.ndarray, kps: np.ndarray, model) -> np.ndarray:
         m = _similarity(kps.astype(np.float64), FFHQ_DST * 512)
         img = Image.fromarray(target.clip(0, 255).astype(np.uint8))
@@ -332,23 +357,29 @@ class FaceSwapper:
         return Source(emb, latent, _skin_stats(np.asarray(img), kps))
 
     def swap_image(self, src: "Source", tgt_img: Image.Image, faces: list, enhance: str | None,
-                   color: float, redetect: bool = True, res_stats=None) -> tuple[np.ndarray, list]:
+                   color: float, redetect: bool = True, res_stats=None,
+                   remove_glasses: bool | None = True) -> tuple[np.ndarray, list]:
         """מחליף פנים בתמונה אחת. faces = רשימת (bbox, kps, score) בתמונת היעד.
 
+        remove_glasses: True = תמיד שלב מחיקת המשקפיים (inswapper, איטי),
+                        False = מדלגים עליו (מהיר), None = אוטומטי לכל פנים לפי זיהוי משקפיים.
         redetect: לזהות שוב את הפנים אחרי השלב הראשון (מדויק יותר בתמונות;
                   בסרטון מדלגים כדי לחסוך זמן ולמנוע רעידות).
         מחזיר (מערך התמונה, הפנים שעליהן נעשה החידוד והצבע).
         """
         result = np.asarray(tgt_img, dtype=np.float32).copy()
 
-        # שלב 1: inswapper - מוחק משקפיים ודברים שמכסים את הפנים
-        for _, kps, _ in faces:
-            result = self._inswap_one(tgt_img, result, kps, src.latent)
+        # שלב 1: inswapper - מוחק משקפיים ודברים שמכסים את הפנים (רק כשצריך - זה השלב הכי איטי)
+        stage1 = False
+        for face in faces:
+            if remove_glasses or (remove_glasses is None and self.has_glasses(tgt_img, face)):
+                result = self._inswap_one(tgt_img, result, face[1], src.latent)
+                stage1 = True
 
         # שלב 2: HyperSwap על הפנים ה"נקיות" - איכות ודמיון טובים יותר
-        mid_img = Image.fromarray(result.clip(0, 255).astype(np.uint8))
+        mid_img = Image.fromarray(result.clip(0, 255).astype(np.uint8)) if stage1 else tgt_img
         mid_faces = faces
-        if redetect:
+        if redetect and stage1:
             mid_faces = (self.detect(np.asarray(mid_img)) or faces)[:len(faces)]
         for _, kps, _ in mid_faces:
             result = self._swap_one(mid_img, result, kps, src.emb)
@@ -366,7 +397,8 @@ class FaceSwapper:
         return result, mid_faces
 
     def swap_faces(self, source: bytes, target: bytes, all_faces: bool = True,
-                   enhance: str | None = "gpen", color: float = 0.6) -> tuple[bytes, int]:
+                   enhance: str | None = "gpen", color: float = 0.6,
+                   remove_glasses: bool | None = None) -> tuple[bytes, int]:
         """לוקח את הפנים הגדולות בתמונת המקור ושם אותן על הפנים בתמונת היעד.
 
         enhance: מודל החידוד - "gpen" / "restore" / "gfpgan", או None בלי חידוד.
@@ -381,7 +413,7 @@ class FaceSwapper:
             raise NoFaceError("target")
         if not all_faces:
             tgt_faces = tgt_faces[:1]
-        result, _ = self.swap_image(src, tgt_img, tgt_faces, enhance, color)
+        result, _ = self.swap_image(src, tgt_img, tgt_faces, enhance, color, remove_glasses=remove_glasses)
 
         out = BytesIO()
         Image.fromarray(result.clip(0, 255).astype(np.uint8)).save(out, "JPEG", quality=95)

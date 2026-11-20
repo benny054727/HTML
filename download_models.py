@@ -1,4 +1,4 @@
-"""מוריד את מודלי החלפת הפנים לתיקייה models/ (בערך 2.2GB להורדה).
+"""מוריד את מודלי החלפת הפנים לתיקייה models/ (בערך 2.3GB להורדה).
 
 הרצה:  python download_models.py
 """
@@ -18,6 +18,7 @@ SWAPPER_URL = "https://github.com/facefusion/facefusion-assets/releases/download
 GFPGAN_URL = ASSETS + "gfpgan_1.4.onnx"
 GPEN_URL = ASSETS + "gpen_bfr_512.onnx"
 RESTORE_URL = ASSETS + "restoreformer_plus_plus.onnx"
+PARSER_URL = "https://github.com/facefusion/facefusion-assets/releases/download/models-3.1.0/bisenet_resnet_18.onnx"
 
 # שם קובץ -> sha256 (לוודא שההורדה תקינה ושזה בדיוק הקובץ שנבדק)
 HASHES = {
@@ -28,6 +29,7 @@ HASHES = {
     "gfpgan_1.4.onnx": "accc4757b26bdb89b32b4d3500d4f79c9dff97c1dd7c7104bf9dcb95e3311385",
     "gpen_bfr_512.onnx": "d5f066b9068a8b74217f9712e28e875a6144629b108a6f7355acbdb3a2832c54",
     "restoreformer_plus_plus.onnx": "164818b70d1745da4108a45c9263b05452236d14ac0ffab2202af0ac4a438195",
+    "bisenet_resnet_18.onnx": "2218b6183c26ca5c83303232d682a536c670c13ea9695f716c777d1f244eefe9",
 }
 
 
@@ -101,6 +103,12 @@ def main() -> None:
         download(RESTORE_URL, MODELS_DIR / "restoreformer_plus_plus.onnx")
     else:
         print("✅ מודל החידוד RestoreFormer++ כבר קיים")
+
+    if not ok("bisenet_resnet_18.onnx"):
+        print("⬇️  מוריד את מודל זיהוי המשקפיים (~53MB)...")
+        download(PARSER_URL, MODELS_DIR / "bisenet_resnet_18.onnx")
+    else:
+        print("✅ מודל זיהוי המשקפיים כבר קיים")
 
     print("🔎 בודק שהקבצים תקינים...")
     bad = [n for n in HASHES if not ok(n)]
