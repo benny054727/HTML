@@ -1,4 +1,4 @@
-"""מוריד את מודלי החלפת הפנים לתיקייה models/ (בערך 1.6GB להורדה).
+"""מוריד את מודלי החלפת הפנים לתיקייה models/ (בערך 2.2GB להורדה).
 
 הרצה:  python download_models.py
 """
@@ -16,6 +16,8 @@ ASSETS = "https://github.com/facefusion/facefusion-assets/releases/download/mode
 INSWAPPER_URL = ASSETS + "inswapper_128.onnx"
 SWAPPER_URL = "https://github.com/facefusion/facefusion-assets/releases/download/models-3.3.0/hyperswap_1a_256.onnx"
 GFPGAN_URL = ASSETS + "gfpgan_1.4.onnx"
+GPEN_URL = ASSETS + "gpen_bfr_512.onnx"
+RESTORE_URL = ASSETS + "restoreformer_plus_plus.onnx"
 
 # שם קובץ -> sha256 (לוודא שההורדה תקינה ושזה בדיוק הקובץ שנבדק)
 HASHES = {
@@ -24,6 +26,8 @@ HASHES = {
     "inswapper_128.onnx": "a290273ed497312095dac48cdef20feec9d5208298223dd01288ab202b54bea7",
     "hyperswap_1a_256.onnx": "c0e98a8a03a238f461ed3d2570e426b49f46745ee400854a60dceeb70c246add",
     "gfpgan_1.4.onnx": "accc4757b26bdb89b32b4d3500d4f79c9dff97c1dd7c7104bf9dcb95e3311385",
+    "gpen_bfr_512.onnx": "d5f066b9068a8b74217f9712e28e875a6144629b108a6f7355acbdb3a2832c54",
+    "restoreformer_plus_plus.onnx": "164818b70d1745da4108a45c9263b05452236d14ac0ffab2202af0ac4a438195",
 }
 
 
@@ -85,6 +89,18 @@ def main() -> None:
         download(GFPGAN_URL, MODELS_DIR / "gfpgan_1.4.onnx")
     else:
         print("✅ מודל שחזור הפנים כבר קיים")
+
+    if not ok("gpen_bfr_512.onnx"):
+        print("⬇️  מוריד את מודל החידוד GPEN (~285MB)...")
+        download(GPEN_URL, MODELS_DIR / "gpen_bfr_512.onnx")
+    else:
+        print("✅ מודל החידוד GPEN כבר קיים")
+
+    if not ok("restoreformer_plus_plus.onnx"):
+        print("⬇️  מוריד את מודל החידוד RestoreFormer++ (~295MB)...")
+        download(RESTORE_URL, MODELS_DIR / "restoreformer_plus_plus.onnx")
+    else:
+        print("✅ מודל החידוד RestoreFormer++ כבר קיים")
 
     print("🔎 בודק שהקבצים תקינים...")
     bad = [n for n in HASHES if not ok(n)]

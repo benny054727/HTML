@@ -18,7 +18,7 @@ pip install -r requirements.txt
 python download_models.py
 ```
 
-`download_models.py` מוריד כ-1.6GB של מודלים לתיקייה `models/` ובודק שהם תקינים.
+`download_models.py` מוריד כ-2.2GB של מודלים לתיקייה `models/` ובודק שהם תקינים.
 
 ## שלב 4 – הגדרת הטוקן
 ```bash
@@ -50,7 +50,7 @@ python bot.py
 | `/id` | ה-ID שלך |
 | `/swap` | החלפת פנים: תמונה מקורית ואז תמונת יעד |
 | `/cancel` | ביטול החלפה באמצע |
-| `/enhance` | הדלקה/כיבוי של חידוד הפנים (GFPGAN) |
+| `/enhance gpen` | בחירת מודל חידוד: `gpen` (חזק, ברירת מחדל) / `restore` (טבעי) / `gfpgan` (עדין) / `off` |
 | `/color 60` | כמה מצבע העור של התמונה המקורית להעביר (0-100, ברירת מחדל 60) |
 | טקסט רגיל | הבוט מחזיר אותו |
 
@@ -61,6 +61,6 @@ python bot.py
 
 ⚠️ השתמש רק בתמונות של אנשים שהסכימו לכך.
 
-ההחלפה נעשית בשני שלבים: inswapper (מוחק משקפיים ודברים שמכסים את הפנים) ואז HyperSwap (איכות ודמיון). אחרי ההחלפה הפנים עוברות חידוד עם GFPGAN (אפשר לכבות עם `/enhance`).
+ההחלפה נעשית בשני שלבים: inswapper (מוחק משקפיים ודברים שמכסים את הפנים) ואז HyperSwap (איכות ודמיון). אחרי ההחלפה הפנים עוברות חידוד - GPEN כברירת מחדל (אפשר להחליף או לכבות עם `/enhance`).
 
-המודלים (InsightFace: SCRFD, ArcFace, inswapper_128; FaceFusion: HyperSwap 1a; GFPGAN) מותרים לשימוש אישי ולא מסחרי בלבד (HyperSwap: רישיון ResearchRAIL).
+המודלים (InsightFace: SCRFD, ArcFace, inswapper_128; FaceFusion: HyperSwap 1a; GPEN, RestoreFormer++, GFPGAN) מותרים לשימוש אישי ולא מסחרי בלבד (HyperSwap: רישיון ResearchRAIL).

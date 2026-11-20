@@ -70,7 +70,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/time - השעה עכשיו\n"
         "/id - ה-ID שלך בטלגרם\n"
         "/swap - החלפת פנים\n"
-        "/enhance - הדלקה/כיבוי של חידוד הפנים (GFPGAN)\n"
+        "/enhance - בחירת מודל חידוד הפנים (gpen / restore / gfpgan / off)\n"
         "/color - כמה מצבע העור של התמונה המקורית להעביר (0-100)\n"
         "/cancel - ביטול החלפה באמצע\n\n"
         "🔄 איך מחליפים פנים:\n"
@@ -104,14 +104,28 @@ async def swap_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+DEFAULT_ENHANCE = "gpen"
+ENHANCE_INFO = {
+    "gpen": "GPEN - חידוד חזק, הכי חד ומפורט",
+    "restore": "RestoreFormer++ - חידוד טבעי",
+    "gfpgan": "GFPGAN - חידוד עדין",
+    "off": "בלי חידוד - הכי מהיר",
+}
+
+
 async def enhance_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # chat_data נשמר גם כש-user_data מתאפס בתחילת כל /swap
-    on = not context.chat_data.get("enhance", True)
-    context.chat_data["enhance"] = on
-    if on:
-        await update.message.reply_text("✨ חידוד הפנים: פועל\nהפנים יוצאות חדות יותר, אבל לוקח קצת יותר זמן.")
-    else:
-        await update.message.reply_text("⚡ חידוד הפנים: כבוי\nמהיר יותר, אבל הפנים פחות חדות.")
+    current = context.chat_data.get("enhance", DEFAULT_ENHANCE)
+    choice = context.args[0].lower() if context.args else None
+    if choice not in ENHANCE_INFO:
+        options = "\n".join(f"/enhance {k} - {v}" for k, v in ENHANCE_INFO.items())
+        prefix = "❌ אפשרות לא מוכרת.\n\n" if choice else ""
+        await update.message.reply_text(
+            f"{prefix}✨ חידוד פנים כרגע: {ENHANCE_INFO[current]}\n\nלשינוי:\n{options}"
+        )
+        return
+    context.chat_data["enhance"] = choice
+    await update.message.reply_text(f"✨ חידוד פנים: {ENHANCE_INFO[choice]}")
 
 
 DEFAULT_COLOR = 60  # אחוז העברת צבע העור כברירת מחדל
@@ -172,8 +186,11 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         async with _swap_lock:  # אחד בכל פעם, כדי לא להעמיס על הטלפון
             swapper = await asyncio.to_thread(_load_swapper)
-            enhance = context.chat_data.get("enhance", True)
+            enhance = context.chat_data.get("enhance", DEFAULT_ENHANCE)
+            enhance = None if enhance == "off" else enhance
             color = context.chat_data.get("color", DEFAULT_COLOR) / 100
+            # אם מודל החידוד שנבחר לא הורד - מחליפים בלי חידוד ומודיעים
+            missing = enhance if enhance and await asyncio.to_thread(swapper.enhancer, enhance) is None else None
             result, _ = await asyncio.to_thread(swapper.swap_faces, source, target, False, enhance, color)
     except FileNotFoundError as e:
         log.error("חסרים קבצי מודלים: %s", e)
@@ -193,7 +210,10 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     await status.delete()
-    await msg.reply_photo(result, caption="✅ הנה! להחלפה נוספת: /swap")
+    caption = "✅ הנה! להחלפה נוספת: /swap"
+    if missing:
+        caption += f"\n\n⚠️ מודל החידוד '{missing}' לא הורד, אז התמונה בלי חידוד. ב-Termux הרץ: python download_models.py"
+    await msg.reply_photo(result, caption=caption)
 
 
 async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

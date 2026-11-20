@@ -5,7 +5,8 @@
   w600k_r50.onnx     - "טביעת אצבע" של פנים (ArcFace)
   inswapper_128.onnx    - החלפה ראשונה: מוחקת משקפיים ודברים שמכסים את הפנים
   hyperswap_1a_256.onnx - החלפה שנייה: איכות ודמיון (FaceFusion HyperSwap, 256x256)
-  gfpgan_1.4.onnx    - שחזור וחידוד פנים אחרי ההחלפה (רשות)
+  gpen_bfr_512.onnx / restoreformer_plus_plus.onnx / gfpgan_1.4.onnx
+                     - חידוד פנים אחרי ההחלפה (רשות, בוחרים אחד)
 """
 
 from io import BytesIO
@@ -40,6 +41,13 @@ FFHQ_DST = np.array(
      [0.39308822, 0.72541100], [0.61150205, 0.72490465]],
     dtype=np.float64,
 )
+
+# מודלי החידוד: שם קצר -> קובץ. נטענים רק כשבוחרים בהם (חוסך זיכרון)
+ENHANCERS = {
+    "gpen": "gpen_bfr_512.onnx",
+    "restore": "restoreformer_plus_plus.onnx",
+    "gfpgan": "gfpgan_1.4.onnx",
+}
 
 ENHANCE_BLEND = 0.8  # כמה מהשחזור לקחת (1.0 = הכל). קצת פחות נראה טבעי יותר
 
@@ -165,10 +173,9 @@ class FaceSwapper:
         self.inswap = ort.InferenceSession(str(ins_path), opts, providers=prov)
         self.emap = _load_emap(ins_path)
         self.swap = ort.InferenceSession(str(models_dir / "hyperswap_1a_256.onnx"), opts, providers=prov)
-        # מודל השחזור הוא רשות - אם הוא לא הורד, פשוט מדלגים עליו
-        enh_path = models_dir / "gfpgan_1.4.onnx"
-        self.enhancer = ort.InferenceSession(str(enh_path), opts, providers=prov) if enh_path.is_file() else None
-        self.enh_in = self.enhancer.get_inputs()[0].name if self.enhancer else None
+        # מודלי החידוד הם רשות - נטענים רק כשמבקשים אותם
+        self._models_dir, self._opts, self._prov = models_dir, opts, prov
+        self._enhancers: dict = {}
         self.det_in = self.det.get_inputs()[0].name
         self.rec_in = self.rec.get_inputs()[0].name
 
@@ -292,20 +299,31 @@ class FaceSwapper:
         face = ((out.transpose(1, 2, 0) * 0.5 + 0.5).clip(0, 1) * 255).astype(np.uint8)
         return self._paste(target, Image.fromarray(face), m)
 
-    # --- שחזור פנים (GFPGAN) ---
-    def _enhance_one(self, target: np.ndarray, kps: np.ndarray) -> np.ndarray:
+    # --- חידוד פנים (GPEN / RestoreFormer++ / GFPGAN) ---
+    def enhancer(self, name: str):
+        """מחזיר את מודל החידוד, או None אם הקובץ שלו לא הורד."""
+        if name not in self._enhancers:
+            path = self._models_dir / ENHANCERS[name]
+            if not path.is_file():
+                return None
+            self._enhancers.clear()  # רק מודל חידוד אחד בזיכרון בכל פעם
+            self._enhancers[name] = ort.InferenceSession(str(path), self._opts, providers=self._prov)
+        return self._enhancers[name]
+
+    def _enhance_one(self, target: np.ndarray, kps: np.ndarray, model) -> np.ndarray:
         m = _similarity(kps.astype(np.float64), FFHQ_DST * 512)
         img = Image.fromarray(target.clip(0, 255).astype(np.uint8))
         crop = np.asarray(_warp(img, m, (512, 512)), dtype=np.float32)
         blob = ((crop / 255.0 - 0.5) / 0.5).transpose(2, 0, 1)[None]
-        out = self.enhancer.run(None, {self.enh_in: blob})[0][0]
+        out = model.run(None, {model.get_inputs()[0].name: blob})[0][0]
         face = ((out.transpose(1, 2, 0).clip(-1, 1) + 1) / 2 * 255).astype(np.uint8)
         return self._paste(target, Image.fromarray(face), m, ENHANCE_BLEND)
 
     def swap_faces(self, source: bytes, target: bytes, all_faces: bool = True,
-                   enhance: bool = True, color: float = 0.6) -> tuple[bytes, int]:
+                   enhance: str | None = "gpen", color: float = 0.6) -> tuple[bytes, int]:
         """לוקח את הפנים הגדולות בתמונת המקור ושם אותן על הפנים בתמונת היעד.
 
+        enhance: מודל החידוד - "gpen" / "restore" / "gfpgan", או None בלי חידוד.
         color: כמה מצבע העור של התמונה המקורית להעביר (0 = כלום, 1 = הכל).
 
         מחזיר (JPEG כבייטים, מספר הפנים שהוחלפו).
@@ -339,10 +357,11 @@ class FaceSwapper:
         for _, kps, _ in mid_faces:
             result = self._swap_one(mid_img, result, kps, emb)
 
-        # שלב 3 (רשות): חידוד עם GFPGAN
-        if enhance and self.enhancer is not None:
+        # שלב 3 (רשות): חידוד הפנים
+        model = self.enhancer(enhance) if enhance else None
+        if model is not None:
             for _, kps, _ in mid_faces:
-                result = self._enhance_one(result, kps)
+                result = self._enhance_one(result, kps, model)
 
         # שלב 4 (רשות): העברת צבע העור מהתמונה המקורית
         if color > 0:
