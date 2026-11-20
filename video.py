@@ -69,6 +69,50 @@ def _out_size(w: int, h: int, short_side: int) -> tuple[int, int]:
     return max(2, int(w * scale) // 2 * 2), max(2, int(h * scale) // 2 * 2)
 
 
+def preview_frame(swapper: fs.FaceSwapper, src: fs.Source, in_path: Path, mode: str = "fast",
+                  enhance: str | None = None, color: float = 0.6) -> tuple[bytes, float, int]:
+    """מחליף פנים בפריים אחד (הראשון שיש בו פנים) - לתצוגה מקדימה לפני כל הסרטון.
+
+    מחזיר (JPEG, כמה שניות לקח הפריים, כמה פריימים יהיו בסרטון) - בשביל הערכת זמן.
+    """
+    import time
+    from io import BytesIO
+
+    cfg = MODES[mode]
+    info = probe(in_path)
+    fps = min(cfg["fps"], info["fps"])
+    w, h = _out_size(info["width"], info["height"], cfg["short_side"])
+    seconds = min(info["duration"] or MAX_SECONDS, MAX_SECONDS)
+    total = max(1, int(round(seconds * fps)))
+    enhance = enhance if cfg["enhance"] else None
+
+    # מחפשים פנים ב-2 פריימים לשנייה, בשניות הראשונות
+    decoder = subprocess.Popen(
+        ["ffmpeg", "-v", "error", "-t", str(MAX_SECONDS), "-i", str(in_path),
+         "-vf", f"fps=2,scale={w}:{h}", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    try:
+        while True:
+            raw = decoder.stdout.read(w * h * 3)
+            if len(raw) < w * h * 3:
+                raise NoFaceInVideo()
+            img = Image.frombytes("RGB", (w, h), raw)
+            faces = swapper.detect(np.asarray(img))
+            if faces:
+                break
+    finally:
+        if decoder.poll() is None:
+            decoder.kill()
+            decoder.wait()
+
+    started = time.monotonic()
+    result, _ = swapper.swap_image(src, img, faces[:1], enhance, color, redetect=False)
+    took = time.monotonic() - started
+    out = BytesIO()
+    Image.fromarray(result.clip(0, 255).astype(np.uint8)).save(out, "JPEG", quality=92)
+    return out.getvalue(), took, total
+
+
 def swap_video(swapper: fs.FaceSwapper, src: fs.Source, in_path: Path, out_path: Path,
                mode: str = "fast", enhance: str | None = None, color: float = 0.6,
                progress=None, cancel=None) -> dict:

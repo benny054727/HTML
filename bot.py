@@ -169,7 +169,9 @@ HELP_TEXT = (
     "1. לוחצים 'החלפה בסרטון'\n"
     "2. שולחים תמונה מקורית\n"
     "3. שולחים סרטון (עד 20MB, נחתך ל-15 שניות)\n"
+    "4. מקבלים תצוגה מקדימה של פריים אחד - ולוחצים 'המשך' או 'בטל'\n"
     "אפשר לעצור עיבוד באמצע עם '⛔ עצור עיבוד'.\n\n"
+    "🙂 הבוט זוכר את התמונה המקורית האחרונה - אפשר להשתמש בה שוב בלחיצה.\n\n"
     "⚙️ ההגדרות (חידוד, צבע עור, מצב סרטון) נשמרות עד שמשנים אותן.\n\n"
     "פקודות: /swap /swapvideo /enhance /color /videomode /cancel\n\n"
     f"{CONSENT}"
@@ -362,17 +364,35 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def begin_flow(update: Update, context: ContextTypes.DEFAULT_TYPE, kind: str) -> None:
     context.user_data.clear()
+    _drop_video_job(context)  # תצוגה מקדימה ישנה שלא אושרה - נמחקת
     if kind == "photo":
         context.user_data["step"] = "source"
-        text = ("📸 החלפת פנים בתמונה\n\n"
-                "1️⃣ שלח עכשיו את התמונה המקורית - ממנה אקח את הפנים.\n\n"
-                f"{CONSENT}")
+        text = "📸 החלפת פנים בתמונה\n\n1️⃣ שלח עכשיו את התמונה המקורית - ממנה אקח את הפנים."
     else:
         context.user_data["step"] = "vsource"
-        text = ("🎬 החלפת פנים בסרטון\n\n"
-                "1️⃣ שלח עכשיו את התמונה המקורית - ממנה אקח את הפנים.\n\n"
-                f"מצב: {VIDEO_MODE_INFO[_video_mode(context)]}\n"
-                f"{CONSENT}")
+        text = ("🎬 החלפת פנים בסרטון\n\n1️⃣ שלח עכשיו את התמונה המקורית - ממנה אקח את הפנים.\n\n"
+                f"מצב: {VIDEO_MODE_INFO[_video_mode(context)]}")
+    last = context.chat_data.get("last_source")
+    if last:
+        # מציגים את הפנים מהפעם הקודמת, עם כפתור להשתמש בהן שוב
+        await update.effective_chat.send_photo(
+            last, caption=f"{text}\n\n🙂 או להשתמש בפנים מהפעם הקודמת:\n\n{CONSENT}",
+            reply_markup=InlineKeyboardMarkup([[btn("🙂 להשתמש בפנים האלה", "src:last")],
+                                               [btn("❌ ביטול", "cancel")]]))
+    else:
+        await update.effective_chat.send_message(f"{text}\n\n{CONSENT}", reply_markup=CANCEL_KB)
+
+
+async def _accept_source(update: Update, context: ContextTypes.DEFAULT_TYPE, source: bytes) -> None:
+    """שמירת התמונה המקורית ומעבר לשלב הבא (תמונת יעד / סרטון)."""
+    context.user_data["source"] = source
+    context.chat_data["last_source"] = source  # נזכור לפעם הבאה (רק בזיכרון, נמחק כשהבוט נכבה)
+    if context.user_data.get("step") == "source":
+        context.user_data["step"] = "target"
+        text = "✅ קיבלתי.\n\n2️⃣ עכשיו שלח את תמונת היעד - אליה אעביר את הפנים."
+    else:
+        context.user_data["step"] = "video"
+        text = "✅ קיבלתי.\n\n2️⃣ עכשיו שלח את הסרטון - אליו אעביר את הפנים (עד 20MB)."
     await update.effective_chat.send_message(text, reply_markup=CANCEL_KB)
 
 
@@ -452,6 +472,23 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await on_access_button(update, context, data)
         return
 
+    if data.startswith("vjob:"):
+        await on_video_job_button(update, context, data[5:])
+        return
+
+    if data == "src:last":
+        last = context.chat_data.get("last_source")
+        if not last or context.user_data.get("step") not in ("source", "vsource"):
+            await query.answer("פג תוקף - התחל מחדש מהתפריט")
+            return
+        await query.answer("🙂 משתמש בפנים הקודמות")
+        try:
+            await query.edit_message_reply_markup(None)
+        except BadRequest:
+            pass
+        await _accept_source(update, context, last)
+        return
+
     await query.answer()
 
     if data == "home":
@@ -479,7 +516,10 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await query.edit_message_text(HELP_TEXT, reply_markup=BACK_HOME_KB)
     elif data == "cancel":
         context.user_data.clear()
-        await query.edit_message_text("❌ בוטל.", reply_markup=BACK_HOME_KB)
+        try:
+            await query.edit_message_text("❌ בוטל.", reply_markup=BACK_HOME_KB)
+        except BadRequest:  # הודעה עם תמונה
+            await query.edit_message_caption("❌ בוטל.", reply_markup=BACK_HOME_KB)
 
 
 # ---------- קבלת תמונות ----------
@@ -494,18 +534,8 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     msg = update.message
     step = context.user_data.get("step")
 
-    if step == "source":
-        context.user_data["source"] = await _download(update)
-        context.user_data["step"] = "target"
-        await msg.reply_text("✅ קיבלתי.\n\n2️⃣ עכשיו שלח את תמונת היעד - אליה אעביר את הפנים.",
-                             reply_markup=CANCEL_KB)
-        return
-
-    if step == "vsource":
-        context.user_data["source"] = await _download(update)
-        context.user_data["step"] = "video"
-        await msg.reply_text("✅ קיבלתי.\n\n2️⃣ עכשיו שלח את הסרטון - אליו אעביר את הפנים (עד 20MB).",
-                             reply_markup=CANCEL_KB)
+    if step in ("source", "vsource"):
+        await _accept_source(update, context, await _download(update))
         return
 
     if step == "video":
@@ -559,7 +589,15 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 # ---------- קבלת סרטונים ----------
 
+def _drop_video_job(context) -> None:
+    """מוחק סרטון שמחכה לאישור תצוגה מקדימה (והקבצים שלו)."""
+    job = context.chat_data.pop("video_job", None)
+    if job:
+        shutil.rmtree(job["workdir"], ignore_errors=True)
+
+
 async def on_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """קיבלנו סרטון: מורידים, ושולחים תצוגה מקדימה של פריים אחד לפני העיבוד המלא."""
     msg = update.message
     if context.user_data.get("step") != "video":
         await msg.reply_text("כדי להחליף פנים בסרטון, בחר קודם מה לעשות:", reply_markup=home_keyboard(context))
@@ -573,30 +611,94 @@ async def on_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
-    source = context.user_data["source"]
+    _drop_video_job(context)
+    job = {
+        "source": context.user_data["source"],
+        "mode": _video_mode(context),
+        "enhance": None if _enhance(context) == "off" else _enhance(context),
+        "color": _color(context) / 100,
+        "workdir": Path(tempfile.mkdtemp(prefix="swapvideo_")),
+    }
+    job["in_path"] = job["workdir"] / "in.mp4"
     context.user_data.clear()
-    mode = _video_mode(context)
-    enhance = _enhance(context)
-    enhance = None if enhance == "off" else enhance
-    color = _color(context) / 100
+    cancel = threading.Event()
+    context.chat_data["video_cancel"] = cancel  # כדי ש'עצור' יעבוד גם בזמן התצוגה המקדימה
+
+    status = await msg.reply_text("📥 מוריד את הסרטון...", reply_markup=STOP_KB)
+    keep = False
+    try:
+        await (await media.get_file()).download_to_drive(job["in_path"])
+        if _swap_lock.locked():
+            await status.edit_text("⏳ ממתין שעבודה קודמת תסתיים...", reply_markup=STOP_KB)
+        async with _swap_lock:
+            if cancel.is_set():
+                raise _Stopped()
+            await status.edit_text("🔍 מכין תצוגה מקדימה...", reply_markup=STOP_KB)
+            swapper = await asyncio.to_thread(_load_swapper)
+            import video  # noqa: E402 - נטען רק כשצריך
+
+            src = await asyncio.to_thread(swapper.prepare_source, job["source"])
+            preview, sec_per_frame, total = await asyncio.to_thread(
+                video.preview_frame, swapper, src, job["in_path"], job["mode"], job["enhance"], job["color"])
+        if cancel.is_set():
+            raise _Stopped()
+        minutes = max(1, round(sec_per_frame * total * 1.15 / 60))  # +15% לפירוק והרכבה
+        context.chat_data["video_job"] = job
+        keep = True
+        await status.delete()
+        await msg.reply_photo(
+            preview,
+            caption=(f"👀 תצוגה מקדימה - ככה ייראו הפנים בסרטון.\n\n"
+                     f"⏱️ עיבוד הסרטון המלא: {total} פריימים, בערך {minutes} דק'.\n"
+                     "להמשיך?"),
+            reply_markup=InlineKeyboardMarkup([[btn("✅ המשך לסרטון המלא", "vjob:go"),
+                                                btn("❌ בטל", "vjob:no")]]),
+        )
+    except Exception as e:
+        await _video_error(status, e)
+    finally:
+        if context.chat_data.get("video_cancel") is cancel:
+            context.chat_data.pop("video_cancel", None)
+        if not keep:
+            shutil.rmtree(job["workdir"], ignore_errors=True)
+
+
+async def on_video_job_button(update: Update, context: ContextTypes.DEFAULT_TYPE, action: str) -> None:
+    query = update.callback_query
+    job = context.chat_data.pop("video_job", None)
+    if job is None:
+        await query.answer("פג תוקף - שלח את הסרטון שוב")
+        try:
+            await query.edit_message_reply_markup(after_result_kb("video"))
+        except BadRequest:
+            pass
+        return
+    await query.answer()
+    if action != "go":
+        shutil.rmtree(job["workdir"], ignore_errors=True)
+        await query.edit_message_caption("❌ בוטל.", reply_markup=after_result_kb("video"))
+        return
+    await query.edit_message_caption("👀 תצוגה מקדימה - אושר ✅")
+    await process_video(update, context, job)
+
+
+async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE, job: dict) -> None:
+    """עיבוד הסרטון המלא (אחרי שאישרו את התצוגה המקדימה)."""
+    chat = update.effective_chat
     cancel = threading.Event()
     context.chat_data["video_cancel"] = cancel
-
-    workdir = Path(tempfile.mkdtemp(prefix="swapvideo_"))
-    in_path, out_path = workdir / "in.mp4", workdir / "out.mp4"
-    status = await msg.reply_text("📥 מוריד את הסרטון...", reply_markup=STOP_KB)
+    out_path = job["workdir"] / "out.mp4"
+    status = await chat.send_message("⏳ מתחיל...", reply_markup=STOP_KB)
     try:
-        await (await media.get_file()).download_to_drive(in_path)
         if _swap_lock.locked():
             await status.edit_text("⏳ ממתין שעבודה קודמת תסתיים...", reply_markup=STOP_KB)
         async with _swap_lock:  # אחד בכל פעם, כדי לא להעמיס על הטלפון
             if cancel.is_set():
                 raise _Stopped()
-            await status.edit_text("⏳ טוען מודלים...", reply_markup=STOP_KB)
             swapper = await asyncio.to_thread(_load_swapper)
-            import video  # noqa: E402 - נטען רק כשצריך
+            import video  # noqa: E402
 
-            src = await asyncio.to_thread(swapper.prepare_source, source)
+            src = await asyncio.to_thread(swapper.prepare_source, job["source"])
             loop = asyncio.get_running_loop()
             started, last = time.monotonic(), [0.0, -1]
             pending = []  # עדכוני התקדמות שעוד לא נשלחו
@@ -614,8 +716,8 @@ async def on_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     status.edit_text(text, reply_markup=STOP_KB), loop))
 
             try:
-                info = await asyncio.to_thread(video.swap_video, swapper, src, in_path, out_path,
-                                               mode, enhance, color, progress, cancel)
+                info = await asyncio.to_thread(video.swap_video, swapper, src, job["in_path"], out_path,
+                                               job["mode"], job["enhance"], job["color"], progress, cancel)
             finally:
                 # מחכים שעדכוני ההתקדמות יסתיימו, כדי שלא ידרסו את ההודעה הבאה
                 await asyncio.gather(*(asyncio.wrap_future(f) for f in pending), return_exceptions=True)
@@ -625,41 +727,45 @@ async def on_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                                    reply_markup=after_result_kb("video"))
             return
         await status.edit_text("📤 שולח...")
-        await msg.chat.send_action("upload_video")
+        await chat.send_action("upload_video")
         caption = f"✅ הנה! ({info['frames']} פריימים, {took:.1f} דק')"
         if info["trimmed"]:
             caption += f"\n✂️ הסרטון נחתך ל-{video.MAX_SECONDS} השניות הראשונות."
         if info["swapped"] < info["frames"]:
             caption += f"\nℹ️ ב-{info['frames'] - info['swapped']} פריימים לא זוהו פנים, והם נשארו כמו שהם."
         with out_path.open("rb") as f:
-            await msg.reply_video(f, caption=caption, supports_streaming=True,
+            await chat.send_video(f, caption=caption, supports_streaming=True,
                                   read_timeout=300, write_timeout=300, reply_markup=after_result_kb("video"))
         await status.delete()
-    except FileNotFoundError as e:
-        log.error("חסרים קבצי מודלים: %s", e)
-        await status.edit_text(f"❌ חסרים קבצי המודלים: {e}\n\nב-Termux הרץ: python download_models.py",
-                               reply_markup=BACK_HOME_KB)
     except Exception as e:
-        name = type(e).__name__
-        if name in ("Cancelled", "_Stopped"):
-            await status.edit_text("⛔ העיבוד נעצר.", reply_markup=after_result_kb("video"))
-        elif name == "FfmpegMissing":
-            await status.edit_text("❌ חסר ffmpeg. ב-Termux עצור את הבוט (Ctrl+C) והרץ:\npkg install ffmpeg",
-                                   reply_markup=BACK_HOME_KB)
-        elif name == "NoFaceError":
-            await status.edit_text("😕 לא מצאתי פנים בתמונה המקורית. נסה תמונה אחרת.",
-                                   reply_markup=after_result_kb("video"))
-        elif name == "NoFaceInVideo":
-            await status.edit_text("😕 לא מצאתי פנים בסרטון. נסה סרטון אחר.",
-                                   reply_markup=after_result_kb("video"))
-        else:
-            log.exception("החלפת פנים בסרטון נכשלה")
-            await status.edit_text("❌ משהו השתבש בעיבוד הסרטון. נסה שוב.",
-                                   reply_markup=after_result_kb("video"))
+        await _video_error(status, e)
     finally:
         if context.chat_data.get("video_cancel") is cancel:
             context.chat_data.pop("video_cancel", None)
-        shutil.rmtree(workdir, ignore_errors=True)
+        shutil.rmtree(job["workdir"], ignore_errors=True)
+
+
+async def _video_error(status, e: Exception) -> None:
+    name = type(e).__name__
+    if isinstance(e, FileNotFoundError):
+        log.error("חסרים קבצי מודלים: %s", e)
+        await status.edit_text(f"❌ חסרים קבצי המודלים: {e}\n\nב-Termux הרץ: python download_models.py",
+                               reply_markup=BACK_HOME_KB)
+    elif name in ("Cancelled", "_Stopped"):
+        await status.edit_text("⛔ העיבוד נעצר.", reply_markup=after_result_kb("video"))
+    elif name == "FfmpegMissing":
+        await status.edit_text("❌ חסר ffmpeg. ב-Termux עצור את הבוט (Ctrl+C) והרץ:\npkg install ffmpeg",
+                               reply_markup=BACK_HOME_KB)
+    elif name == "NoFaceError":
+        await status.edit_text("😕 לא מצאתי פנים בתמונה המקורית. נסה תמונה אחרת.",
+                               reply_markup=after_result_kb("video"))
+    elif name == "NoFaceInVideo":
+        await status.edit_text("😕 לא מצאתי פנים בסרטון. נסה סרטון אחר.",
+                               reply_markup=after_result_kb("video"))
+    else:
+        log.exception("החלפת פנים בסרטון נכשלה", exc_info=e)
+        await status.edit_text("❌ משהו השתבש בעיבוד הסרטון. נסה שוב.",
+                               reply_markup=after_result_kb("video"))
 
 
 class _Stopped(Exception):
@@ -690,6 +796,9 @@ async def _set_owner_commands(app: Application) -> None:
 
 
 async def post_init(app: Application) -> None:
+    # תיקיות זמניות שנשארו אם הבוט נסגר באמצע עיבוד
+    for old in Path(tempfile.gettempdir()).glob("swapvideo_*"):
+        shutil.rmtree(old, ignore_errors=True)
     # רשימת הפקודות שמופיעה כשמקלידים / בטלגרם
     try:
         await app.bot.set_my_commands(COMMANDS)
