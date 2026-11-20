@@ -319,43 +319,39 @@ class FaceSwapper:
         face = ((out.transpose(1, 2, 0).clip(-1, 1) + 1) / 2 * 255).astype(np.uint8)
         return self._paste(target, Image.fromarray(face), m, ENHANCE_BLEND)
 
-    def swap_faces(self, source: bytes, target: bytes, all_faces: bool = True,
-                   enhance: str | None = "gpen", color: float = 0.6) -> tuple[bytes, int]:
-        """לוקח את הפנים הגדולות בתמונת המקור ושם אותן על הפנים בתמונת היעד.
-
-        enhance: מודל החידוד - "gpen" / "restore" / "gfpgan", או None בלי חידוד.
-        color: כמה מצבע העור של התמונה המקורית להעביר (0 = כלום, 1 = הכל).
-
-        מחזיר (JPEG כבייטים, מספר הפנים שהוחלפו).
-        """
-        src_img = _open(source)
-        src_faces = self.detect(np.asarray(src_img))
-        if not src_faces:
+    # --- התמונה המקורית: מכינים פעם אחת (גם בשביל סרטונים) ---
+    def prepare_source(self, source: bytes) -> "Source":
+        img = _open(source)
+        faces = self.detect(np.asarray(img))
+        if not faces:
             raise NoFaceError("source")
-        emb = self.embedding(src_img, src_faces[0][1])[None].astype(np.float32)
+        kps = faces[0][1]
+        emb = self.embedding(img, kps)[None].astype(np.float32)
         latent = emb @ self.emap
         latent = (latent / np.linalg.norm(latent)).astype(np.float32)
+        return Source(emb, latent, _skin_stats(np.asarray(img), kps))
 
-        tgt_img = _open(target)
-        tgt_faces = self.detect(np.asarray(tgt_img))
-        if not tgt_faces:
-            raise NoFaceError("target")
-        if not all_faces:
-            tgt_faces = tgt_faces[:1]
+    def swap_image(self, src: "Source", tgt_img: Image.Image, faces: list, enhance: str | None,
+                   color: float, redetect: bool = True, res_stats=None) -> tuple[np.ndarray, list]:
+        """מחליף פנים בתמונה אחת. faces = רשימת (bbox, kps, score) בתמונת היעד.
 
+        redetect: לזהות שוב את הפנים אחרי השלב הראשון (מדויק יותר בתמונות;
+                  בסרטון מדלגים כדי לחסוך זמן ולמנוע רעידות).
+        מחזיר (מערך התמונה, הפנים שעליהן נעשה החידוד והצבע).
+        """
         result = np.asarray(tgt_img, dtype=np.float32).copy()
 
         # שלב 1: inswapper - מוחק משקפיים ודברים שמכסים את הפנים
-        for _, kps, _ in tgt_faces:
-            result = self._inswap_one(tgt_img, result, kps, latent)
+        for _, kps, _ in faces:
+            result = self._inswap_one(tgt_img, result, kps, src.latent)
 
         # שלב 2: HyperSwap על הפנים ה"נקיות" - איכות ודמיון טובים יותר
         mid_img = Image.fromarray(result.clip(0, 255).astype(np.uint8))
-        mid_faces = self.detect(np.asarray(mid_img)) or tgt_faces
-        if not all_faces:
-            mid_faces = mid_faces[:1]
+        mid_faces = faces
+        if redetect:
+            mid_faces = (self.detect(np.asarray(mid_img)) or faces)[:len(faces)]
         for _, kps, _ in mid_faces:
-            result = self._swap_one(mid_img, result, kps, emb)
+            result = self._swap_one(mid_img, result, kps, src.emb)
 
         # שלב 3 (רשות): חידוד הפנים
         model = self.enhancer(enhance) if enhance else None
@@ -365,13 +361,38 @@ class FaceSwapper:
 
         # שלב 4 (רשות): העברת צבע העור מהתמונה המקורית
         if color > 0:
-            src_stats = _skin_stats(np.asarray(src_img), src_faces[0][1])
             for _, kps, _ in mid_faces:
-                result = _color_transfer(result, kps, src_stats, color)
+                result = _color_transfer(result, kps, src.stats, color, res_stats)
+        return result, mid_faces
+
+    def swap_faces(self, source: bytes, target: bytes, all_faces: bool = True,
+                   enhance: str | None = "gpen", color: float = 0.6) -> tuple[bytes, int]:
+        """לוקח את הפנים הגדולות בתמונת המקור ושם אותן על הפנים בתמונת היעד.
+
+        enhance: מודל החידוד - "gpen" / "restore" / "gfpgan", או None בלי חידוד.
+        color: כמה מצבע העור של התמונה המקורית להעביר (0 = כלום, 1 = הכל).
+
+        מחזיר (JPEG כבייטים, מספר הפנים שהוחלפו).
+        """
+        src = self.prepare_source(source)
+        tgt_img = _open(target)
+        tgt_faces = self.detect(np.asarray(tgt_img))
+        if not tgt_faces:
+            raise NoFaceError("target")
+        if not all_faces:
+            tgt_faces = tgt_faces[:1]
+        result, _ = self.swap_image(src, tgt_img, tgt_faces, enhance, color)
 
         out = BytesIO()
         Image.fromarray(result.clip(0, 255).astype(np.uint8)).save(out, "JPEG", quality=95)
         return out.getvalue(), len(tgt_faces)
+
+
+class Source:
+    """הפנים מהתמונה המקורית, מוכנות להחלפה."""
+
+    def __init__(self, emb: np.ndarray, latent: np.ndarray, stats):
+        self.emb, self.latent, self.stats = emb, latent, stats
 
 
 # ---------- העברת צבע עור מהתמונה המקורית ----------
@@ -420,9 +441,13 @@ def _skin_stats(img: np.ndarray, kps: np.ndarray) -> tuple[np.ndarray, np.ndarra
     return lab.mean(0), lab.std(0)
 
 
-def _color_transfer(result: np.ndarray, kps: np.ndarray, src_stats, strength: float) -> np.ndarray:
-    """מזיז את צבע הפנים בתוצאה לכיוון הצבע של הפנים בתמונה המקורית."""
-    res_stats = _skin_stats(result, kps)
+def _color_transfer(result: np.ndarray, kps: np.ndarray, src_stats, strength: float,
+                    res_stats=None) -> np.ndarray:
+    """מזיז את צבע הפנים בתוצאה לכיוון הצבע של הפנים בתמונה המקורית.
+
+    res_stats: אפשר לתת צבע מוכן של התוצאה (בסרטון - ממוצע לאורך זמן, כדי שלא יהבהב).
+    """
+    res_stats = res_stats or _skin_stats(result, kps)
     if src_stats is None or res_stats is None:
         return result
     (mu_s, sd_s), (mu_r, sd_r) = src_stats, res_stats
