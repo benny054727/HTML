@@ -2,6 +2,7 @@
 
 import logging
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -71,7 +72,9 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 def main() -> None:
     load_env()
-    token = os.environ.get("BOT_TOKEN")
+    # מנקה תווים נסתרים שנכנסים לפעמים בהדבקה (למשל ב-Termux)
+    match = re.search(r"\d+:[A-Za-z0-9_-]{30,}", os.environ.get("BOT_TOKEN", ""))
+    token = match.group(0) if match else None
     if not token:
         raise SystemExit("❌ חסר BOT_TOKEN. צור קובץ .env (ראה .env.example) ושים בו את הטוקן.")
 
