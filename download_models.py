@@ -1,4 +1,4 @@
-"""מוריד את מודלי החלפת הפנים לתיקייה models/ (בערך 1GB להורדה).
+"""מוריד את מודלי החלפת הפנים לתיקייה models/ (בערך 1.6GB להורדה).
 
 הרצה:  python download_models.py
 """
@@ -13,6 +13,7 @@ MODELS_DIR = Path(__file__).parent / "models"
 
 BUFFALO_URL = "https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip"
 ASSETS = "https://github.com/facefusion/facefusion-assets/releases/download/models-3.0.0/"
+INSWAPPER_URL = ASSETS + "inswapper_128.onnx"
 SWAPPER_URL = "https://github.com/facefusion/facefusion-assets/releases/download/models-3.3.0/hyperswap_1a_256.onnx"
 GFPGAN_URL = ASSETS + "gfpgan_1.4.onnx"
 
@@ -20,6 +21,7 @@ GFPGAN_URL = ASSETS + "gfpgan_1.4.onnx"
 HASHES = {
     "det_10g.onnx": "5838f7fe053675b1c7a08b633df49e7af5495cee0493c7dcf6697200b85b5b91",
     "w600k_r50.onnx": "4c06341c33c2ca1f86781dab0e829f88ad5b64be9fba56e56bc9ebdefc619e43",
+    "inswapper_128.onnx": "a290273ed497312095dac48cdef20feec9d5208298223dd01288ab202b54bea7",
     "hyperswap_1a_256.onnx": "c0e98a8a03a238f461ed3d2570e426b49f46745ee400854a60dceeb70c246add",
     "gfpgan_1.4.onnx": "accc4757b26bdb89b32b4d3500d4f79c9dff97c1dd7c7104bf9dcb95e3311385",
 }
@@ -66,6 +68,12 @@ def main() -> None:
     else:
         print("✅ מודלי זיהוי פנים כבר קיימים")
 
+    if not ok("inswapper_128.onnx"):
+        print("⬇️  מוריד את מודל ההחלפה הראשון inswapper (~555MB)...")
+        download(INSWAPPER_URL, MODELS_DIR / "inswapper_128.onnx")
+    else:
+        print("✅ מודל inswapper כבר קיים")
+
     if not ok("hyperswap_1a_256.onnx"):
         print("⬇️  מוריד את מודל החלפת הפנים HyperSwap (~400MB)...")
         download(SWAPPER_URL, MODELS_DIR / "hyperswap_1a_256.onnx")
@@ -83,11 +91,6 @@ def main() -> None:
     if bad:
         sys.exit(f"❌ קבצים פגומים: {', '.join(bad)}. מחק אותם והרץ שוב.")
     print("✅ כל המודלים מוכנים!")
-
-    old = MODELS_DIR / "inswapper_128.onnx"
-    if old.exists():
-        print("💡 המודל הישן inswapper_128.onnx כבר לא בשימוש. למחיקה (חוסך ~555MB):")
-        print("   rm models/inswapper_128.onnx")
 
 
 if __name__ == "__main__":
