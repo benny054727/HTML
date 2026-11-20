@@ -18,7 +18,7 @@ pip install -r requirements.txt
 python download_models.py
 ```
 
-`download_models.py` מוריד כ-850MB של מודלים לתיקייה `models/` ובודק שהם תקינים.
+`download_models.py` מוריד כ-1.2GB של מודלים לתיקייה `models/` ובודק שהם תקינים.
 
 ## שלב 4 – הגדרת הטוקן
 ```bash
@@ -50,6 +50,7 @@ python bot.py
 | `/id` | ה-ID שלך |
 | `/swap` | החלפת פנים: תמונה מקורית ואז תמונת יעד |
 | `/cancel` | ביטול החלפה באמצע |
+| `/enhance` | הדלקה/כיבוי של חידוד הפנים (GFPGAN) |
 | טקסט רגיל | הבוט מחזיר אותו |
 
 ## החלפת פנים
@@ -59,4 +60,6 @@ python bot.py
 
 ⚠️ השתמש רק בתמונות של אנשים שהסכימו לכך.
 
-המודלים (InsightFace: SCRFD, ArcFace, inswapper_128) מותרים לשימוש אישי ולא מסחרי בלבד.
+אחרי ההחלפה הפנים עוברות חידוד עם GFPGAN (אפשר לכבות עם `/enhance`).
+
+המודלים (InsightFace: SCRFD, ArcFace, inswapper_128; GFPGAN) מותרים לשימוש אישי ולא מסחרי בלבד.

@@ -4,6 +4,7 @@
   det_10g.onnx       - זיהוי פנים (SCRFD)
   w600k_r50.onnx     - "טביעת אצבע" של פנים (ArcFace)
   inswapper_128.onnx - המודל שמחליף את הפנים
+  gfpgan_1.4.onnx    - שחזור וחידוד פנים אחרי ההחלפה (רשות)
 """
 
 from io import BytesIO
@@ -23,6 +24,16 @@ ARCFACE_DST = np.array(
      [41.5493, 92.3655], [70.7299, 92.2041]],
     dtype=np.float32,
 )
+
+
+# מיקום 5 נקודות הפנים בתבנית FFHQ (בשביל GFPGAN), כשבר מגודל התמונה
+FFHQ_DST = np.array(
+    [[0.37691676, 0.46864664], [0.62285697, 0.46912813], [0.50123859, 0.61331904],
+     [0.39308822, 0.72541100], [0.61150205, 0.72490465]],
+    dtype=np.float64,
+)
+
+ENHANCE_BLEND = 0.8  # כמה מהשחזור לקחת (1.0 = הכל). קצת פחות נראה טבעי יותר
 
 
 class NoFaceError(Exception):
@@ -145,6 +156,10 @@ class FaceSwapper:
         swap_path = models_dir / "inswapper_128.onnx"
         self.swap = ort.InferenceSession(str(swap_path), opts, providers=prov)
         self.emap = _load_emap(swap_path)
+        # מודל השחזור הוא רשות - אם הוא לא הורד, פשוט מדלגים עליו
+        enh_path = models_dir / "gfpgan_1.4.onnx"
+        self.enhancer = ort.InferenceSession(str(enh_path), opts, providers=prov) if enh_path.is_file() else None
+        self.enh_in = self.enhancer.get_inputs()[0].name if self.enhancer else None
         self.det_in = self.det.get_inputs()[0].name
         self.rec_in = self.rec.get_inputs()[0].name
 
@@ -211,17 +226,13 @@ class FaceSwapper:
         emb = self.rec.run(None, {self.rec_in: blob})[0][0]
         return emb / np.linalg.norm(emb)
 
-    # --- החלפה והדבקה חזרה ---
-    def _swap_one(self, img: Image.Image, target: np.ndarray, kps: np.ndarray, latent: np.ndarray) -> np.ndarray:
-        m = _align_matrix(kps, 128)
-        aligned = _warp(img, m, (128, 128))
-        blob = (np.asarray(aligned, dtype=np.float32) / 255.0).transpose(2, 0, 1)[None]
-        out = self.swap.run(None, {"target": blob, "source": latent})[0][0]
-        fake = Image.fromarray((out.transpose(1, 2, 0).clip(0, 1) * 255).astype(np.uint8))
-
-        # מחזירים את הפנים החדשות למקום בתמונה, רק באזור הפנים (מהיר יותר)
+    # --- הדבקת פנים מעובדות חזרה לתמונה ---
+    @staticmethod
+    def _paste(target: np.ndarray, face: Image.Image, m: np.ndarray, blend: float = 1.0) -> np.ndarray:
+        """מדביק תמונת פנים מיושרת (face) חזרה ל-target. m ממפה מ-target לפנים המיושרות."""
+        fs = face.size[0]
         inv = _invert(m)
-        corners = np.array([[0, 0, 1], [128, 0, 1], [0, 128, 1], [128, 128, 1]], dtype=np.float64)
+        corners = np.array([[0, 0, 1], [fs, 0, 1], [0, fs, 1], [fs, fs, 1]], dtype=np.float64)
         pts = corners @ inv.T
         h, w = target.shape[:2]
         x0, y0 = np.floor(pts.min(0)).astype(int) - 2
@@ -229,11 +240,12 @@ class FaceSwapper:
         x0, y0, x1, y1 = max(x0, 0), max(y0, 0), min(x1, w), min(y1, h)
         if x1 <= x0 or y1 <= y0:
             return target
+        # עובדים רק על האזור של הפנים (מהיר יותר)
         shift = np.array([[1, 0, -x0], [0, 1, -y0], [0, 0, 1]], dtype=np.float64)
         to_crop = (shift @ np.vstack([inv, [0, 0, 1]]))[:2]
         size = (x1 - x0, y1 - y0)
-        fake_c = np.asarray(_warp(fake, to_crop, size), dtype=np.float32)
-        mask = np.asarray(_warp(Image.new("L", (128, 128), 255), to_crop, size), dtype=np.float32)
+        face_c = np.asarray(_warp(face, to_crop, size), dtype=np.float32)
+        mask = np.asarray(_warp(Image.new("L", (fs, fs), 255), to_crop, size), dtype=np.float32)
 
         # מסכה עם קצוות רכים כדי שהמעבר ייראה טבעי
         mask = np.where(mask > 20, 255.0, 0.0)
@@ -247,13 +259,33 @@ class FaceSwapper:
         ksize = 2 * k + 1
         sigma = 0.3 * ((ksize - 1) * 0.5 - 1) + 0.8
         mask = ndimage.gaussian_filter(mask, sigma, truncate=k / sigma)
-        mask = (mask / 255.0)[..., None]
+        mask = (mask / 255.0 * blend)[..., None]
 
         region = target[y0:y1, x0:x1]
-        target[y0:y1, x0:x1] = mask * fake_c + (1 - mask) * region
+        target[y0:y1, x0:x1] = mask * face_c + (1 - mask) * region
         return target
 
-    def swap_faces(self, source: bytes, target: bytes, all_faces: bool = True) -> tuple[bytes, int]:
+    # --- החלפה ---
+    def _swap_one(self, img: Image.Image, target: np.ndarray, kps: np.ndarray, latent: np.ndarray) -> np.ndarray:
+        m = _align_matrix(kps, 128)
+        aligned = _warp(img, m, (128, 128))
+        blob = (np.asarray(aligned, dtype=np.float32) / 255.0).transpose(2, 0, 1)[None]
+        out = self.swap.run(None, {"target": blob, "source": latent})[0][0]
+        fake = Image.fromarray((out.transpose(1, 2, 0).clip(0, 1) * 255).astype(np.uint8))
+        return self._paste(target, fake, m)
+
+    # --- שחזור פנים (GFPGAN) ---
+    def _enhance_one(self, target: np.ndarray, kps: np.ndarray) -> np.ndarray:
+        m = _similarity(kps.astype(np.float64), FFHQ_DST * 512)
+        img = Image.fromarray(target.clip(0, 255).astype(np.uint8))
+        crop = np.asarray(_warp(img, m, (512, 512)), dtype=np.float32)
+        blob = ((crop / 255.0 - 0.5) / 0.5).transpose(2, 0, 1)[None]
+        out = self.enhancer.run(None, {self.enh_in: blob})[0][0]
+        face = ((out.transpose(1, 2, 0).clip(-1, 1) + 1) / 2 * 255).astype(np.uint8)
+        return self._paste(target, Image.fromarray(face), m, ENHANCE_BLEND)
+
+    def swap_faces(self, source: bytes, target: bytes, all_faces: bool = True,
+                   enhance: bool = True) -> tuple[bytes, int]:
         """לוקח את הפנים הגדולות בתמונת המקור ושם אותן על הפנים בתמונת היעד.
 
         מחזיר (JPEG כבייטים, מספר הפנים שהוחלפו).
@@ -276,6 +308,9 @@ class FaceSwapper:
         result = np.asarray(tgt_img, dtype=np.float32).copy()
         for _, kps, _ in tgt_faces:
             result = self._swap_one(tgt_img, result, kps, latent)
+        if enhance and self.enhancer is not None:
+            for _, kps, _ in tgt_faces:
+                result = self._enhance_one(result, kps)
 
         out = BytesIO()
         Image.fromarray(result.clip(0, 255).astype(np.uint8)).save(out, "JPEG", quality=95)

@@ -1,4 +1,4 @@
-"""מוריד את מודלי החלפת הפנים לתיקייה models/ (בערך 750MB להורדה).
+"""מוריד את מודלי החלפת הפנים לתיקייה models/ (בערך 1.2GB להורדה).
 
 הרצה:  python download_models.py
 """
@@ -12,13 +12,16 @@ from pathlib import Path
 MODELS_DIR = Path(__file__).parent / "models"
 
 BUFFALO_URL = "https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip"
-SWAPPER_URL = "https://github.com/facefusion/facefusion-assets/releases/download/models-3.0.0/inswapper_128.onnx"
+ASSETS = "https://github.com/facefusion/facefusion-assets/releases/download/models-3.0.0/"
+SWAPPER_URL = ASSETS + "inswapper_128.onnx"
+GFPGAN_URL = ASSETS + "gfpgan_1.4.onnx"
 
 # שם קובץ -> sha256 (לוודא שההורדה תקינה ושזה בדיוק הקובץ שנבדק)
 HASHES = {
     "det_10g.onnx": "5838f7fe053675b1c7a08b633df49e7af5495cee0493c7dcf6697200b85b5b91",
     "w600k_r50.onnx": "4c06341c33c2ca1f86781dab0e829f88ad5b64be9fba56e56bc9ebdefc619e43",
     "inswapper_128.onnx": "a290273ed497312095dac48cdef20feec9d5208298223dd01288ab202b54bea7",
+    "gfpgan_1.4.onnx": "accc4757b26bdb89b32b4d3500d4f79c9dff97c1dd7c7104bf9dcb95e3311385",
 }
 
 
@@ -68,6 +71,12 @@ def main() -> None:
         download(SWAPPER_URL, MODELS_DIR / "inswapper_128.onnx")
     else:
         print("✅ מודל החלפת הפנים כבר קיים")
+
+    if not ok("gfpgan_1.4.onnx"):
+        print("⬇️  מוריד את מודל שחזור הפנים GFPGAN (~340MB)...")
+        download(GFPGAN_URL, MODELS_DIR / "gfpgan_1.4.onnx")
+    else:
+        print("✅ מודל שחזור הפנים כבר קיים")
 
     print("🔎 בודק שהקבצים תקינים...")
     bad = [n for n in HASHES if not ok(n)]

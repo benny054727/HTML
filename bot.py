@@ -70,6 +70,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/time - השעה עכשיו\n"
         "/id - ה-ID שלך בטלגרם\n"
         "/swap - החלפת פנים\n"
+        "/enhance - הדלקה/כיבוי של חידוד הפנים (GFPGAN)\n"
         "/cancel - ביטול החלפה באמצע\n\n"
         "🔄 איך מחליפים פנים:\n"
         "1. שולחים /swap\n"
@@ -100,6 +101,16 @@ async def swap_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"{CONSENT}\n"
         "לביטול: /cancel"
     )
+
+
+async def enhance_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # chat_data נשמר גם כש-user_data מתאפס בתחילת כל /swap
+    on = not context.chat_data.get("enhance", True)
+    context.chat_data["enhance"] = on
+    if on:
+        await update.message.reply_text("✨ חידוד הפנים: פועל\nהפנים יוצאות חדות יותר, אבל לוקח קצת יותר זמן.")
+    else:
+        await update.message.reply_text("⚡ חידוד הפנים: כבוי\nמהיר יותר, אבל הפנים פחות חדות.")
 
 
 async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -136,7 +147,8 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         async with _swap_lock:  # אחד בכל פעם, כדי לא להעמיס על הטלפון
             swapper = await asyncio.to_thread(_load_swapper)
-            result, _ = await asyncio.to_thread(swapper.swap_faces, source, target, False)
+            enhance = context.chat_data.get("enhance", True)
+            result, _ = await asyncio.to_thread(swapper.swap_faces, source, target, False, enhance)
     except FileNotFoundError as e:
         log.error("חסרים קבצי מודלים: %s", e)
         await status.edit_text(
@@ -177,6 +189,7 @@ def main() -> None:
     app.add_handler(CommandHandler("id", id_cmd))
     app.add_handler(CommandHandler("swap", swap_cmd))
     app.add_handler(CommandHandler("cancel", cancel_cmd))
+    app.add_handler(CommandHandler("enhance", enhance_cmd))
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, on_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
 
