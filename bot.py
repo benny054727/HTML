@@ -137,9 +137,13 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         async with _swap_lock:  # אחד בכל פעם, כדי לא להעמיס על הטלפון
             swapper = await asyncio.to_thread(_load_swapper)
             result, _ = await asyncio.to_thread(swapper.swap_faces, source, target, False)
-    except FileNotFoundError:
-        log.exception("חסרים מודלים")
-        await status.edit_text("❌ חסרים קבצי המודלים. ב-Termux הרץ: python download_models.py")
+    except FileNotFoundError as e:
+        log.error("חסרים קבצי מודלים: %s", e)
+        await status.edit_text(
+            f"❌ חסרים קבצי המודלים: {e}\n\n"
+            "ב-Termux עצור את הבוט (Ctrl+C) והרץ:\n"
+            "python download_models.py"
+        )
         return
     except Exception as e:
         if type(e).__name__ == "NoFaceError":

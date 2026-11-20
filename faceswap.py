@@ -133,6 +133,10 @@ def _load_emap(path: Path) -> np.ndarray:
 
 class FaceSwapper:
     def __init__(self, models_dir: Path = MODELS_DIR):
+        names = ("det_10g.onnx", "w600k_r50.onnx", "inswapper_128.onnx")
+        missing = [n for n in names if not (models_dir / n).is_file()]
+        if missing:
+            raise FileNotFoundError(", ".join(missing))
         opts = ort.SessionOptions()
         opts.log_severity_level = 3  # בלי אזהרות מיותרות
         prov = ["CPUExecutionProvider"]
