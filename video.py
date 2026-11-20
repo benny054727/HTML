@@ -31,6 +31,10 @@ class NoFaceInVideo(Exception):
     """לא נמצאו פנים באף פריים."""
 
 
+class Cancelled(Exception):
+    """המשתמש עצר את העיבוד."""
+
+
 def _run(cmd: list[str]) -> str:
     try:
         return subprocess.run(cmd, capture_output=True, text=True, check=True).stdout
@@ -67,8 +71,11 @@ def _out_size(w: int, h: int, short_side: int) -> tuple[int, int]:
 
 def swap_video(swapper: fs.FaceSwapper, src: fs.Source, in_path: Path, out_path: Path,
                mode: str = "fast", enhance: str | None = None, color: float = 0.6,
-               progress=None) -> dict:
-    """מחליף את הפנים הגדולות בכל פריים. progress(done, total) נקרא מדי פעם."""
+               progress=None, cancel=None) -> dict:
+    """מחליף את הפנים הגדולות בכל פריים. progress(done, total) נקרא מדי פעם.
+
+    cancel: threading.Event - אם הוא מופעל, העיבוד נעצר (Cancelled) והקובץ החלקי נמחק.
+    """
     cfg = MODES[mode]
     info = probe(in_path)
     fps = min(cfg["fps"], info["fps"])
@@ -97,6 +104,8 @@ def swap_video(swapper: fs.FaceSwapper, src: fs.Source, in_path: Path, out_path:
     missing = 0
     try:
         while True:
+            if cancel is not None and cancel.is_set():
+                raise Cancelled()
             raw = decoder.stdout.read(frame_bytes)
             if len(raw) < frame_bytes:
                 break
@@ -136,11 +145,14 @@ def swap_video(swapper: fs.FaceSwapper, src: fs.Source, in_path: Path, out_path:
         err = encoder.stderr.read().decode(errors="replace")
         if encoder.wait() != 0:
             raise RuntimeError(f"ffmpeg encode failed: {err[-500:]}")
+    except BaseException:
+        out_path.unlink(missing_ok=True)  # לא משאירים קובץ חלקי
+        raise
     finally:
-        if decoder.poll() is None:
-            decoder.kill()
-        if encoder.poll() is None:
-            encoder.kill()
+        for proc in (decoder, encoder):
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
 
     if done == 0:
         raise ValueError("no frames decoded")
