@@ -71,6 +71,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/id - ה-ID שלך בטלגרם\n"
         "/swap - החלפת פנים\n"
         "/enhance - הדלקה/כיבוי של חידוד הפנים (GFPGAN)\n"
+        "/color - כמה מצבע העור של התמונה המקורית להעביר (0-100)\n"
         "/cancel - ביטול החלפה באמצע\n\n"
         "🔄 איך מחליפים פנים:\n"
         "1. שולחים /swap\n"
@@ -113,6 +114,30 @@ async def enhance_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text("⚡ חידוד הפנים: כבוי\nמהיר יותר, אבל הפנים פחות חדות.")
 
 
+DEFAULT_COLOR = 60  # אחוז העברת צבע העור כברירת מחדל
+
+
+async def color_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    current = context.chat_data.get("color", DEFAULT_COLOR)
+    if not context.args:
+        await update.message.reply_text(
+            f"🎨 העברת צבע עור: {current}%\n\n"
+            "כמה מצבע העור של התמונה המקורית להעביר לתוצאה.\n"
+            "0 = הצבע של תמונת היעד, 100 = הצבע של התמונה המקורית.\n\n"
+            "לשינוי, שלח למשל:\n/color 60"
+        )
+        return
+    try:
+        value = int(context.args[0].strip("%"))
+        if not 0 <= value <= 100:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("❌ צריך מספר בין 0 ל-100. למשל: /color 60")
+        return
+    context.chat_data["color"] = value
+    await update.message.reply_text(f"🎨 העברת צבע עור: {value}%")
+
+
 async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.clear()
     await update.message.reply_text("❌ בוטל. לחזרה: /swap")
@@ -148,7 +173,8 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         async with _swap_lock:  # אחד בכל פעם, כדי לא להעמיס על הטלפון
             swapper = await asyncio.to_thread(_load_swapper)
             enhance = context.chat_data.get("enhance", True)
-            result, _ = await asyncio.to_thread(swapper.swap_faces, source, target, False, enhance)
+            color = context.chat_data.get("color", DEFAULT_COLOR) / 100
+            result, _ = await asyncio.to_thread(swapper.swap_faces, source, target, False, enhance, color)
     except FileNotFoundError as e:
         log.error("חסרים קבצי מודלים: %s", e)
         await status.edit_text(
@@ -190,6 +216,7 @@ def main() -> None:
     app.add_handler(CommandHandler("swap", swap_cmd))
     app.add_handler(CommandHandler("cancel", cancel_cmd))
     app.add_handler(CommandHandler("enhance", enhance_cmd))
+    app.add_handler(CommandHandler("color", color_cmd))
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, on_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
 

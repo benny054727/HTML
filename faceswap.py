@@ -13,7 +13,7 @@ from pathlib import Path
 
 import numpy as np
 import onnxruntime as ort
-from PIL import Image, ImageOps
+from PIL import Image, ImageDraw, ImageOps
 from scipy import ndimage
 
 MODELS_DIR = Path(__file__).parent / "models"
@@ -303,8 +303,10 @@ class FaceSwapper:
         return self._paste(target, Image.fromarray(face), m, ENHANCE_BLEND)
 
     def swap_faces(self, source: bytes, target: bytes, all_faces: bool = True,
-                   enhance: bool = True) -> tuple[bytes, int]:
+                   enhance: bool = True, color: float = 0.6) -> tuple[bytes, int]:
         """לוקח את הפנים הגדולות בתמונת המקור ושם אותן על הפנים בתמונת היעד.
+
+        color: כמה מצבע העור של התמונה המקורית להעביר (0 = כלום, 1 = הכל).
 
         מחזיר (JPEG כבייטים, מספר הפנים שהוחלפו).
         """
@@ -342,9 +344,81 @@ class FaceSwapper:
             for _, kps, _ in mid_faces:
                 result = self._enhance_one(result, kps)
 
+        # שלב 4 (רשות): העברת צבע העור מהתמונה המקורית
+        if color > 0:
+            src_stats = _skin_stats(np.asarray(src_img), src_faces[0][1])
+            for _, kps, _ in mid_faces:
+                result = _color_transfer(result, kps, src_stats, color)
+
         out = BytesIO()
         Image.fromarray(result.clip(0, 255).astype(np.uint8)).save(out, "JPEG", quality=95)
         return out.getvalue(), len(tgt_faces)
+
+
+# ---------- העברת צבע עור מהתמונה המקורית ----------
+
+def _rgb2lab(a: np.ndarray) -> np.ndarray:
+    a = a / 255.0
+    a = np.where(a > 0.04045, ((a + 0.055) / 1.055) ** 2.4, a / 12.92)
+    xyz = a @ np.array([[0.4124, 0.3576, 0.1805], [0.2126, 0.7152, 0.0722], [0.0193, 0.1192, 0.9505]]).T
+    xyz /= np.array([0.95047, 1.0, 1.08883])
+    f = np.where(xyz > 0.008856, np.cbrt(xyz), 7.787 * xyz + 16 / 116)
+    return np.stack([116 * f[..., 1] - 16, 500 * (f[..., 0] - f[..., 1]), 200 * (f[..., 1] - f[..., 2])], -1)
+
+
+def _lab2rgb(lab: np.ndarray) -> np.ndarray:
+    fy = (lab[..., 0] + 16) / 116
+    f = np.stack([fy + lab[..., 1] / 500, fy, fy - lab[..., 2] / 200], -1)
+    xyz = np.where(f ** 3 > 0.008856, f ** 3, (f - 16 / 116) / 7.787) * np.array([0.95047, 1.0, 1.08883])
+    rgb = xyz @ np.array([[3.2406, -1.5372, -0.4986], [-0.9689, 1.8758, 0.0415], [0.0557, -0.2040, 1.0570]]).T
+    rgb = np.where(rgb > 0.0031308, 1.055 * np.clip(rgb, 0, None) ** (1 / 2.4) - 0.055, 12.92 * rgb)
+    return (rgb * 255).clip(0, 255)
+
+
+def _face_ellipse(size: tuple[int, int], k: np.ndarray, feather: bool) -> np.ndarray:
+    """מסכה בצורת אליפסה על הפנים (מהעיניים עד הסנטר), לפי 5 נקודות הפנים."""
+    w, h = size
+    eye_c, mouth_c = (k[0] + k[1]) / 2, (k[3] + k[4]) / 2
+    eye_d = np.linalg.norm(k[1] - k[0])
+    center = (eye_c + mouth_c) / 2 + (mouth_c - eye_c) * 0.15
+    ang = np.degrees(np.arctan2(k[1][1] - k[0][1], k[1][0] - k[0][0]))
+    rx, ry = eye_d * 1.0, np.linalg.norm(mouth_c - eye_c) * 1.5
+    ell = Image.new("L", (int(rx * 2) + 2, int(ry * 2) + 2), 0)
+    ImageDraw.Draw(ell).ellipse([1, 1, rx * 2 + 1, ry * 2 + 1], fill=255)
+    ell = ell.rotate(-ang, expand=True, resample=Image.BILINEAR)
+    m = Image.new("L", (w, h), 0)
+    m.paste(ell, (int(center[0] - ell.size[0] / 2), int(center[1] - ell.size[1] / 2)))
+    m = np.asarray(m, dtype=np.float32) / 255
+    return ndimage.gaussian_filter(m, eye_d * 0.15) if feather else m
+
+
+def _skin_stats(img: np.ndarray, kps: np.ndarray) -> tuple[np.ndarray, np.ndarray] | None:
+    """ממוצע ופיזור של צבע הפנים (במרחב LAB)."""
+    sel = _face_ellipse((img.shape[1], img.shape[0]), kps, False) > 0.5
+    if sel.sum() < 20:
+        return None
+    lab = _rgb2lab(img[sel].astype(np.float64))
+    return lab.mean(0), lab.std(0)
+
+
+def _color_transfer(result: np.ndarray, kps: np.ndarray, src_stats, strength: float) -> np.ndarray:
+    """מזיז את צבע הפנים בתוצאה לכיוון הצבע של הפנים בתמונה המקורית."""
+    res_stats = _skin_stats(result, kps)
+    if src_stats is None or res_stats is None:
+        return result
+    (mu_s, sd_s), (mu_r, sd_r) = src_stats, res_stats
+    soft = _face_ellipse((result.shape[1], result.shape[0]), kps, True)
+    ys, xs = np.nonzero(soft > 0.01)
+    if ys.size == 0:
+        return result
+    y0, y1, x0, x1 = ys.min(), ys.max() + 1, xs.min(), xs.max() + 1  # רק באזור הפנים
+    region = result[y0:y1, x0:x1].astype(np.float64)
+    lab = _rgb2lab(region)
+    moved = (lab - mu_r) / (sd_r + 1e-6) * sd_s + mu_s
+    rgb = _lab2rgb(lab + strength * (moved - lab))
+    m = soft[y0:y1, x0:x1, None]
+    result[y0:y1, x0:x1] = m * rgb + (1 - m) * region
+    return result
 
 
 def _open(data: bytes) -> Image.Image:
