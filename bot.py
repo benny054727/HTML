@@ -13,6 +13,7 @@ from pathlib import Path
 
 from telegram import (
     BotCommand,
+    BotCommandScopeChat,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
@@ -22,12 +23,16 @@ from telegram import (
 from telegram.error import BadRequest, InvalidToken
 from telegram.ext import (
     Application,
+    ApplicationHandlerStop,
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
+    TypeHandler,
     filters,
 )
+
+from access import Access
 
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
@@ -41,6 +46,9 @@ TG_DOWNLOAD_LIMIT = 20 * 1024 * 1024  # בוט יכול להוריד מטלגר�
 TG_UPLOAD_LIMIT = 50 * 1024 * 1024    # ולשלוח עד 50MB
 
 HOME_TEXT = "🏠 תפריט ראשי"  # הכפתור הקבוע בתחתית המסך
+
+ACCESS = Access()  # מי מורשה להשתמש בבוט (access.json)
+MAX_CLAIM_TRIES = 5  # אחרי 5 קודים שגויים - נוצר קוד חדש
 
 # המודלים נטענים פעם אחת, בפעם הראשונה שמישהו מבקש החלפה
 _swapper = None
@@ -166,6 +174,143 @@ HELP_TEXT = (
     "פקודות: /swap /swapvideo /enhance /color /videomode /cancel\n\n"
     f"{CONSENT}"
 )
+
+
+# ---------- הרשאות ----------
+
+def _who(user) -> str:
+    return user.full_name + (f" (@{user.username})" if user.username else "")
+
+
+def _new_claim_code() -> str:
+    code = ACCESS.new_claim_code()
+    # באנגלית, כי Termux מציג עברית הפוך
+    log.warning("=" * 50)
+    log.warning("OWNER SETUP - send this to the bot in Telegram:   /claim %s", code)
+    log.warning("=" * 50)
+    return code
+
+
+async def gate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """רץ לפני כל הודעה: משתמש לא מורשה לא מגיע לשום פקודה."""
+    user = update.effective_user
+    if user is None:
+        raise ApplicationHandlerStop
+    if ACCESS.is_allowed(user.id):
+        return
+    msg, query = update.effective_message, update.callback_query
+    text = (msg.text or "") if msg and not query else ""
+
+    if ACCESS.owner is None:
+        if text.startswith("/claim"):
+            return  # ממשיך ל-claim_cmd
+        if msg and not query:
+            await msg.reply_text("🔒 הבוט עוד לא הוגדר.\nהבעלים צריך לשלוח לבוט את קוד ההגדרה שמופיע ב-Termux (/claim ...).")
+        elif query:
+            await query.answer("🔒 אין הרשאה")
+        raise ApplicationHandlerStop
+
+    if query:
+        await query.answer("🔒 אין לך הרשאה")
+        raise ApplicationHandlerStop
+    if ACCESS.is_blocked(user.id) or msg is None:
+        raise ApplicationHandlerStop  # חסום - מתעלמים בשקט
+
+    await msg.reply_text("🔒 אין לך הרשאה להשתמש בבוט הזה.\nשלחתי בקשה לבעלים - אם יאשר, תקבל הודעה.")
+    if ACCESS.mark_pending(user.id, _who(user)):
+        try:
+            await context.bot.send_message(
+                ACCESS.owner,
+                f"🔔 בקשת גישה חדשה:\n{_who(user)}\nID: {user.id}",
+                reply_markup=InlineKeyboardMarkup([[btn("✅ אשר", f"acc:ok:{user.id}"),
+                                                    btn("❌ דחה", f"acc:no:{user.id}")]]),
+            )
+        except Exception:
+            log.warning("לא הצלחתי לשלוח בקשת גישה לבעלים", exc_info=True)
+    raise ApplicationHandlerStop
+
+
+async def claim_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if ACCESS.is_owner(user.id):
+        await update.message.reply_text("👑 אתה כבר הבעלים של הבוט.")
+        return
+    if ACCESS.owner is not None:
+        return
+    code = context.args[0].strip() if context.args else ""
+    if ACCESS.claim(user.id, _who(user), code):
+        log.info("Owner set: %s (%s)", user.id, _who(user))
+        await _set_owner_commands(context.application)
+        await update.message.reply_text(
+            "👑 מעולה! אתה הבעלים של הבוט.\n\n"
+            "• רק אתה ומי שתאשר יכולים להשתמש בו.\n"
+            "• כשמישהו אחר יכתוב לבוט, תקבל בקשה עם כפתורי אישור/דחייה.\n"
+            "• ניהול משתמשים: /users",
+            reply_markup=HOME_KEYBOARD,
+        )
+        await show_home(update, context)
+        return
+    tries = context.bot_data["claim_tries"] = context.bot_data.get("claim_tries", 0) + 1
+    if tries >= MAX_CLAIM_TRIES:
+        context.bot_data["claim_tries"] = 0
+        _new_claim_code()
+        await update.message.reply_text("❌ קוד שגוי יותר מדי פעמים. נוצר קוד חדש - ראה ב-Termux.")
+    else:
+        await update.message.reply_text("❌ קוד שגוי. הקוד מופיע במסך של Termux.")
+
+
+def users_view() -> tuple[str, InlineKeyboardMarkup]:
+    rows = []
+    others = {k: v for k, v in ACCESS.allowed.items() if k != ACCESS.owner}
+    lines = [f"👑 בעלים: {ACCESS.allowed.get(ACCESS.owner, ACCESS.owner)}", ""]
+    lines.append(f"✅ מורשים ({len(others)}):" if others else "✅ אין משתמשים מורשים נוספים.")
+    for uid, name in others.items():
+        lines.append(f"• {name}")
+        rows.append([btn(f"🚫 הסר: {name[:25]}", f"acc:rm:{uid}")])
+    if ACCESS.blocked:
+        lines += ["", f"⛔ חסומים ({len(ACCESS.blocked)}):"]
+        for uid, name in ACCESS.blocked.items():
+            lines.append(f"• {name}")
+            rows.append([btn(f"♻️ בטל חסימה: {name[:20]}", f"acc:unblock:{uid}")])
+    rows.append([btn("🏠 תפריט ראשי", "home")])
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not ACCESS.is_owner(update.effective_user.id):
+        await update.message.reply_text("🔒 רק הבעלים יכול לנהל משתמשים.")
+        return
+    text, kb = users_view()
+    await update.message.reply_text(text, reply_markup=kb)
+
+
+async def on_access_button(update: Update, context: ContextTypes.DEFAULT_TYPE, data: str) -> None:
+    query = update.callback_query
+    if not ACCESS.is_owner(update.effective_user.id):
+        await query.answer("🔒 רק הבעלים")
+        return
+    _, action, uid = data.split(":")
+    uid = int(uid)
+    if action == "ok":
+        ACCESS.approve(uid)
+        await query.answer("✅ אושר")
+        await query.edit_message_text(f"✅ אישרת את {ACCESS.allowed.get(uid, uid)}")
+        try:
+            await context.bot.send_message(uid, "✅ קיבלת גישה לבוט! שלח /start", reply_markup=HOME_KEYBOARD)
+        except Exception:
+            log.warning("לא הצלחתי להודיע למשתמש %s", uid, exc_info=True)
+    elif action == "no":
+        ACCESS.block(uid)
+        await query.answer("❌ נדחה")
+        await query.edit_message_text(f"❌ דחית את {ACCESS.blocked.get(uid, uid)} (אפשר לבטל ב-/users)")
+    else:
+        if action == "rm":
+            ACCESS.remove(uid)
+        elif action == "unblock":
+            ACCESS.remove(uid)  # יוכל לבקש גישה שוב
+        await query.answer("עודכן")
+        text, kb = users_view()
+        await query.edit_message_text(text, reply_markup=kb)
 
 
 # ---------- דף הבית ----------
@@ -301,6 +446,10 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if data == "stop":
         stopped = _stop_running_video(context)
         await query.answer("⛔ עוצר..." if stopped else "אין עיבוד פעיל")
+        return
+
+    if data.startswith("acc:"):
+        await on_access_button(update, context, data)
         return
 
     await query.answer()
@@ -531,12 +680,25 @@ COMMANDS = [
 ]
 
 
+async def _set_owner_commands(app: Application) -> None:
+    # לבעלים בלבד: אותה רשימה + /users
+    try:
+        await app.bot.set_my_commands(COMMANDS + [BotCommand("users", "ניהול משתמשים")],
+                                      scope=BotCommandScopeChat(ACCESS.owner))
+    except Exception:
+        log.warning("לא הצלחתי לעדכן את רשימת הפקודות של הבעלים", exc_info=True)
+
+
 async def post_init(app: Application) -> None:
     # רשימת הפקודות שמופיעה כשמקלידים / בטלגרם
     try:
         await app.bot.set_my_commands(COMMANDS)
     except Exception:
         log.warning("לא הצלחתי לעדכן את רשימת הפקודות", exc_info=True)
+    if ACCESS.owner is None:
+        _new_claim_code()
+    else:
+        await _set_owner_commands(app)
 
 
 def main() -> None:
@@ -549,6 +711,9 @@ def main() -> None:
 
     # concurrent_updates: כדי שאפשר יהיה ללחוץ 'עצור' בזמן שסרטון בעיבוד
     app = Application.builder().token(token).concurrent_updates(True).post_init(post_init).build()
+    app.add_handler(TypeHandler(Update, gate), group=-1)  # בדיקת הרשאה לפני הכל
+    app.add_handler(CommandHandler("claim", claim_cmd))
+    app.add_handler(CommandHandler("users", users_cmd))
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("time", time_cmd))
