@@ -53,6 +53,7 @@ MAX_CLAIM_TRIES = 5  # אחרי 5 קודים שגויים - נוצר קוד חד
 # המודלים נטענים פעם אחת, בפעם הראשונה שמישהו מבקש החלפה
 _swapper = None
 _swap_lock = asyncio.Lock()
+_active_cancels: set = set()  # עיבודי סרטון שרצים עכשיו - כדי לעצור אותם כשהבוט נסגר
 
 
 def _load_swapper():
@@ -623,6 +624,7 @@ async def on_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.clear()
     cancel = threading.Event()
     context.chat_data["video_cancel"] = cancel  # כדי ש'עצור' יעבוד גם בזמן התצוגה המקדימה
+    _active_cancels.add(cancel)
 
     status = await msg.reply_text("📥 מוריד את הסרטון...", reply_markup=STOP_KB)
     keep = False
@@ -657,6 +659,7 @@ async def on_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception as e:
         await _video_error(status, e)
     finally:
+        _active_cancels.discard(cancel)
         if context.chat_data.get("video_cancel") is cancel:
             context.chat_data.pop("video_cancel", None)
         if not keep:
@@ -687,6 +690,7 @@ async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE, job:
     chat = update.effective_chat
     cancel = threading.Event()
     context.chat_data["video_cancel"] = cancel
+    _active_cancels.add(cancel)
     out_path = job["workdir"] / "out.mp4"
     status = await chat.send_message("⏳ מתחיל...", reply_markup=STOP_KB)
     try:
@@ -718,9 +722,16 @@ async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE, job:
             try:
                 info = await asyncio.to_thread(video.swap_video, swapper, src, job["in_path"], out_path,
                                                job["mode"], job["enhance"], job["color"], progress, cancel)
-            finally:
-                # מחכים שעדכוני ההתקדמות יסתיימו, כדי שלא ידרסו את ההודעה הבאה
-                await asyncio.gather(*(asyncio.wrap_future(f) for f in pending), return_exceptions=True)
+            except Exception:
+                await _flush(pending)
+                raise
+            except BaseException:
+                # הבוט נסגר באמצע: עוצרים את העיבוד, ולא מחכים לכלום (אחרת הסגירה נתקעת)
+                cancel.set()
+                for f in pending:
+                    f.cancel()
+                raise
+            await _flush(pending)
         took = (time.monotonic() - started) / 60
         if out_path.stat().st_size > TG_UPLOAD_LIMIT:
             await status.edit_text("😕 הסרטון שיצא גדול מ-50MB, וטלגרם לא מאפשר לבוט לשלוח אותו. נסה סרטון קצר יותר.",
@@ -740,9 +751,15 @@ async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE, job:
     except Exception as e:
         await _video_error(status, e)
     finally:
+        _active_cancels.discard(cancel)
         if context.chat_data.get("video_cancel") is cancel:
             context.chat_data.pop("video_cancel", None)
         shutil.rmtree(job["workdir"], ignore_errors=True)
+
+
+async def _flush(pending: list) -> None:
+    """מחכים שעדכוני ההתקדמות יסתיימו, כדי שלא ידרסו את ההודעה הבאה."""
+    await asyncio.gather(*(asyncio.wrap_future(f) for f in pending), return_exceptions=True)
 
 
 async def _video_error(status, e: Exception) -> None:
@@ -795,6 +812,12 @@ async def _set_owner_commands(app: Application) -> None:
         log.warning("לא הצלחתי לעדכן את רשימת הפקודות של הבעלים", exc_info=True)
 
 
+async def post_stop(app: Application) -> None:
+    """הבוט נסגר (Ctrl+C / stop.sh): עוצרים עיבוד סרטון שרץ, כדי שהסגירה לא תיתקע."""
+    for event in list(_active_cancels):
+        event.set()
+
+
 async def post_init(app: Application) -> None:
     # תיקיות זמניות שנשארו אם הבוט נסגר באמצע עיבוד
     for old in Path(tempfile.gettempdir()).glob("swapvideo_*"):
@@ -834,7 +857,7 @@ def main() -> None:
         raise SystemExit("❌ חסר BOT_TOKEN. צור קובץ .env (ראה .env.example) ושים בו את הטוקן.")
 
     # concurrent_updates: כדי שאפשר יהיה ללחוץ 'עצור' בזמן שסרטון בעיבוד
-    app = Application.builder().token(token).concurrent_updates(True).post_init(post_init).build()
+    app = Application.builder().token(token).concurrent_updates(True).post_init(post_init).post_stop(post_stop).build()
     app.add_handler(TypeHandler(Update, gate), group=-1)  # בדיקת הרשאה לפני הכל
     app.add_handler(CommandHandler("claim", claim_cmd))
     app.add_handler(CommandHandler("users", users_cmd))
